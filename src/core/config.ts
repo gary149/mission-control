@@ -57,15 +57,25 @@ function parseToml(text: string): Record<string, Record<string, unknown>> {
       out[section] ??= {};
       continue;
     }
-    const kv = line.match(/^([A-Za-z0-9_\-]+)\s*=\s*(.+?)(\s+#.*)?$/);
-    if (!kv) continue;
-    const key = kv[1]!;
-    let value: unknown = kv[2]!.trim();
-    const str = value as string;
-    if (str.startsWith('"') && str.endsWith('"')) value = str.slice(1, -1);
-    else if (str === "true") value = true;
-    else if (str === "false") value = false;
-    else if (!Number.isNaN(Number(str))) value = Number(str);
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim();
+    if (!/^[A-Za-z0-9_\-]+$/.test(key)) continue;
+    let rhs = line.slice(eq + 1).trim();
+    let value: unknown;
+    if (rhs.startsWith('"')) {
+      // Quote-aware: a '#' INSIDE the string is data, not a comment.
+      const close = rhs.indexOf('"', 1);
+      if (close < 0) continue; // malformed line; skip rather than truncate
+      value = rhs.slice(1, close);
+    } else {
+      const hash = rhs.search(/\s#/);
+      if (hash >= 0) rhs = rhs.slice(0, hash).trim();
+      if (rhs === "true") value = true;
+      else if (rhs === "false") value = false;
+      else if (rhs !== "" && !Number.isNaN(Number(rhs))) value = Number(rhs);
+      else value = rhs;
+    }
     (out[section] ??= {})[key] = value;
   }
   return out;

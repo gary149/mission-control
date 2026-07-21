@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { getAdapter } from "./adapters/registry";
 import { resolveAuth } from "./auth";
 import { loadConfig, runDir } from "./config";
-import { getRun, insertEvent, insertRun } from "./db";
+import { getRun, insertEvent, insertRun, updateRun } from "./db";
 import { PreflightError, type Run, type RunSpec } from "./types";
 import { artifactStaysInside } from "./verify";
 import { createWorkdir } from "./workspace";
@@ -48,10 +48,15 @@ export function launch(spec: RunSpec): Run {
   const auth = resolveAuth(spec, adapter, config);
   const detection = adapter.detect();
   if (!detection.installed || !detection.path) {
-    throw new PreflightError(`harness CLI for "${adapter.name}" not found on this host`);
+    throw new PreflightError(
+      detection.path
+        ? `harness CLI for "${adapter.name}" at ${detection.path} failed its --version probe (stale path? not executable?)`
+        : `harness CLI for "${adapter.name}" not found on this host`,
+    );
   }
 
   const id = newRunId();
+  const title = deriveTitle(spec.goal); // before any disk effects: a bad goal must not orphan a workdir
   const { workdir, isGit } = createWorkdir(id, spec.cwd);
   const dir = runDir(id);
   const specPath = join(dir, "spec.json");
@@ -65,7 +70,7 @@ export function launch(spec: RunSpec): Run {
     model: spec.model,
     host: hostname(),
     goal: spec.goal,
-    title: deriveTitle(spec.goal),
+    title,
     spec_path: specPath,
     workdir,
     session_ref: null,
@@ -107,6 +112,9 @@ export function launch(spec: RunSpec): Run {
     env: { ...process.env, MC_SUPERVISE: id },
   });
   child.unref();
+  // Record the watcher pid on the still-queued row so reap can detect a
+  // supervisor that dies before it ever reaches `running`.
+  if (child.pid) updateRun(id, { supervisor_pid: child.pid });
 
   return run;
 }

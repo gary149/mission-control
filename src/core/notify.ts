@@ -28,15 +28,22 @@ export async function notifyTerminal(run: Run, config: McConfig): Promise<void> 
     ended_at: run.ended_at,
   });
 
-  updateRun(run.id, { notified: true });
-
+  // Deliver FIRST, mark notified LAST: a crash mid-delivery then re-notifies on
+  // the next reap (at-least-once) instead of silently losing the push forever
+  // (at-most-once is the exact lost-run failure mode the SPEC exists to kill).
   if (config.notify.exec) {
     await new Promise<void>((resolveWait) => {
       const child = spawn("sh", ["-c", config.notify.exec!], { stdio: ["pipe", "ignore", "ignore"] });
+      // A hung hook must never pin the supervisor or block the webhook below.
+      const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
+      const done = () => {
+        clearTimeout(timer);
+        resolveWait();
+      };
       child.stdin.write(payload);
       child.stdin.end();
-      child.on("close", () => resolveWait());
-      child.on("error", () => resolveWait());
+      child.on("close", done);
+      child.on("error", done);
     });
   }
 
@@ -52,4 +59,6 @@ export async function notifyTerminal(run: Run, config: McConfig): Promise<void> 
       // Delivery failure must never take the supervisor down with it.
     }
   }
+
+  updateRun(run.id, { notified: true });
 }

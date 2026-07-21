@@ -125,6 +125,18 @@ export function listRuns(): Run[] {
     .map(rowToRun);
 }
 
+/**
+ * Atomically transition a run to `lost` ONLY if it is still active. Returns
+ * false when the supervisor won the race and already wrote a terminal row -
+ * callers must not clobber that truth (reap TOCTOU).
+ */
+export function markLost(id: string): boolean {
+  const result = openDb()
+    .query("UPDATE runs SET exit = 'lost', ended_at = ? WHERE id = ? AND exit IN ('running', 'queued')")
+    .run(new Date().toISOString(), id);
+  return result.changes > 0;
+}
+
 export function insertEvent(runId: string, kind: EventKind, payload: unknown): void {
   const insert = () =>
     openDb()

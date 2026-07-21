@@ -132,9 +132,11 @@ describe("mission-control e2e (stub harness)", () => {
     expect(done.verdict).toBe("unverifiable");
   });
 
-  test("preflight refuses --budget where cost_basis cannot support it", async () => {
+  test("preflight refuses --budget with adapter-correct advice in every mode", async () => {
     const { launch } = await import("../src/core/launch");
 
+    // The claude-code-specific refusal fires first so the user is pointed at
+    // --max-minutes directly, never bounced to --api-key (which also refuses).
     expect(() =>
       launch(
         baseSpec({
@@ -143,7 +145,20 @@ describe("mission-control e2e (stub harness)", () => {
           auth: { mode: "gateway", gateway: "openrouter" },
         }) as never,
       ),
-    ).toThrow(/--budget has no meaning/);
+    ).toThrow(/cannot be enforced.*--max-minutes/);
+  });
+
+  test("TOML parser keeps '#' inside quoted values", async () => {
+    const { loadConfig } = await import("../src/core/config");
+    const { writeFileSync, readFileSync } = await import("node:fs");
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    try {
+      writeFileSync(configPath, `[notify]\nwebhook = "https://example.com/hook?tag=a # not a comment"\n`);
+      expect(loadConfig().notify.webhook).toBe("https://example.com/hook?tag=a # not a comment");
+    } finally {
+      writeFileSync(configPath, original);
+    }
   });
 
   test("preflight refuses unknown gateway and non-prefixed model", async () => {

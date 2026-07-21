@@ -1,7 +1,7 @@
 import { ADAPTERS, getAdapter } from "./core/adapters/registry";
 import { resolveAuth } from "./core/auth";
 import { loadConfig } from "./core/config";
-import { eventsAfter, findRun, listRuns, updateRun, getRun, insertEvent } from "./core/db";
+import { eventsAfter, findRun, listRuns, markLost, getRun, insertEvent } from "./core/db";
 import { launch } from "./core/launch";
 import { notifyTerminal } from "./core/notify";
 import { PreflightError, type Run, type RunSpec } from "./core/types";
@@ -28,31 +28,50 @@ function pidAlive(pid: number | null): boolean {
   }
 }
 
+const QUEUED_GRACE_MS = 15_000;
+
+function isActive(run: Run): boolean {
+  return run.exit === "running" || run.exit === "queued";
+}
+
 /**
- * Detect watcher death: a running row whose SUPERVISOR is gone is lost - even
- * if the harness process itself is still alive, nobody is logging, capping,
- * verifying, or notifying it anymore.
+ * Detect watcher death and missed pushes. A running OR queued row whose
+ * SUPERVISOR is gone is lost - even if the harness process itself is still
+ * alive, nobody is logging, capping, verifying, or notifying it anymore.
+ * The lost transition is atomic (markLost) so a supervisor finishing between
+ * our snapshot and the write can never have its terminal truth clobbered.
+ * Terminal rows that never got their push (crash mid-delivery) are re-notified.
  */
 async function reapLostRuns(runs: Run[]): Promise<Run[]> {
   const config = loadConfig();
   const out: Run[] = [];
   for (const run of runs) {
-    const watcherPid = run.supervisor_pid ?? run.pid;
-    if (run.exit === "running" && !pidAlive(watcherPid)) {
-      const orphanedHarness = run.supervisor_pid != null && pidAlive(run.pid);
-      updateRun(run.id, { exit: "lost", ended_at: new Date().toISOString() });
-      insertEvent(run.id, "exited", {
-        exit: "lost",
-        note: orphanedHarness
-          ? `supervisor died; harness pid ${run.pid} may still be running unwatched`
-          : "supervisor or harness died without a terminal row",
-      });
-      const lost = getRun(run.id)!;
-      await notifyTerminal(lost, config);
-      out.push(lost);
-    } else {
-      out.push(run);
+    let current = run;
+    if (isActive(current)) {
+      const watcherPid = current.supervisor_pid ?? current.pid;
+      // Freshly-launched rows have no watcher pid recorded yet; give them grace.
+      const young =
+        current.exit === "queued" &&
+        watcherPid == null &&
+        Date.now() - new Date(current.started_at).getTime() < QUEUED_GRACE_MS;
+      if (!young && !pidAlive(watcherPid)) {
+        if (markLost(current.id)) {
+          const orphanedHarness = current.pid != null && pidAlive(current.pid);
+          insertEvent(current.id, "exited", {
+            exit: "lost",
+            note: orphanedHarness
+              ? `supervisor died; harness pid ${current.pid} may still be running unwatched`
+              : "watcher died without a terminal row",
+          });
+        }
+        current = getRun(current.id)!;
+      }
     }
+    if (!isActive(current) && !current.notified) {
+      await notifyTerminal(current, config);
+      current = getRun(current.id) ?? current;
+    }
+    out.push(current);
   }
   return out;
 }
@@ -134,7 +153,16 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
 
 async function readSpecFromStdin(): Promise<RunSpec> {
   const text = await new Response(Bun.stdin.stream()).text();
-  const parsed = JSON.parse(text);
+  let parsed: any;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    fail(`--spec -: stdin is not valid JSON`);
+  }
+  // Same fail-closed validation as the flag form - this is the remote-safe
+  // surface, where a malformed payload is the most likely failure mode.
+  if (typeof parsed?.harness !== "string" || !parsed.harness) fail(`--spec -: "harness" (string) is required`);
+  if (typeof parsed?.goal !== "string" || !parsed.goal.trim()) fail(`--spec -: "goal" (string) is required`);
   return {
     harness: parsed.harness,
     model: parsed.model ?? null,
@@ -210,8 +238,10 @@ export async function cliMain(argv: string[]): Promise<void> {
             seq = event.seq;
             console.log(`${event.ts} ${event.kind} ${JSON.stringify(event.payload)}`);
           }
-          const current = getRun(run.id)!;
-          if (current.exit !== "running" && current.exit !== "queued" && eventsAfter(run.id, seq).length === 0) {
+          // Reap here too - otherwise a dead supervisor leaves tail polling a
+          // frozen `running` row forever.
+          const current = (await reapLostRuns([getRun(run.id)!]))[0]!;
+          if (!["running", "queued"].includes(current.exit) && eventsAfter(run.id, seq).length === 0) {
             console.log(`-- terminal: exit=${current.exit} verdict=${current.verdict} --`);
             break;
           }
