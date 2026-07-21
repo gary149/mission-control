@@ -30,15 +30,20 @@ export function createWorkdir(id: string, sourceCwd: string | null): { workdir: 
       }
     }
     const isRepo = spawnSync("git", ["-C", abs, "rev-parse", "--git-dir"], { stdio: "ignore" }).status === 0;
-    if (isRepo) {
-      const wt = spawnSync("git", ["-C", abs, "worktree", "add", "--detach", workdir], {
-        encoding: "utf8",
-      });
-      if (wt.status !== 0) {
-        throw new PreflightError(`git worktree add failed: ${wt.stderr?.trim()}`);
-      }
-      return { workdir, isGit: true };
+    if (!isRepo) {
+      // Silently launching with an EMPTY workdir would hide the task's inputs.
+      throw new PreflightError(
+        `--cwd ${abs} is not a git repository; v0's isolation model is git-worktree-based. ` +
+          `Run \`git init\` there first, or omit --cwd for a fresh empty workdir.`,
+      );
     }
+    const wt = spawnSync("git", ["-C", abs, "worktree", "add", "--detach", workdir], {
+      encoding: "utf8",
+    });
+    if (wt.status !== 0) {
+      throw new PreflightError(`git worktree add failed: ${wt.stderr?.trim()}`);
+    }
+    return { workdir, isGit: true };
   }
 
   mkdirSync(workdir, { recursive: true });

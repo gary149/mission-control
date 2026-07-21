@@ -366,6 +366,10 @@ from what the adapter happens to emit:
 
 - `--budget` is **refused loudly at preflight** wherever the table can't support it —
   never accepted-but-inert (that would be the silent degradation this spec bans).
+- **v0 note (from code review):** claude-code reports cost only in its terminal result
+  event, so even in metered mode a dollar cap could never fire mid-run. `--budget` is
+  therefore refused for claude-code entirely in v0 (the table's "allowed" waits for an
+  incremental cost signal); `--max-minutes` is the enforceable cap.
 - `--max-minutes` is the universal backstop: the supervisor's existing kill-and-notify
   path triggered by wall clock. It's the only cap available for flat-subscription and
   codex runs, and the mitigation for quota-exhausted runs that retry forever.

@@ -60,7 +60,6 @@ describe("mission-control e2e (stub harness)", () => {
       baseSpec({
         goal: `produce out.txt for the e2e test DUMPENV:${envDump}`,
         artifacts: ["out.txt"],
-        budget_usd: 5,
       }) as never,
     );
     expect(run.cost_basis).toBe("metered_reported");
@@ -68,6 +67,7 @@ describe("mission-control e2e (stub harness)", () => {
     const done = await waitTerminal(() => getRun(run.id));
     expect(done.exit).toBe("succeeded");
     expect(done.verdict).toBe("verified");
+    expect(done.supervisor_pid).toBeGreaterThan(0);
     expect(done.cost_usd).toBe(0.42);
     expect(done.tokens_in).toBe(1000);
     expect(done.tokens_out).toBe(250);
@@ -188,5 +188,44 @@ describe("mission-control e2e (stub harness)", () => {
   test("workspace containment refuses agent-state directories", async () => {
     const { launch } = await import("../src/core/launch");
     expect(() => launch(baseSpec({ cwd: join(process.env.HOME!, ".claude") }) as never)).toThrow(/agent-state/);
+  });
+
+  test("preflight refuses --budget on claude-code even when metered (terminal-only cost)", async () => {
+    const { launch } = await import("../src/core/launch");
+    expect(() => launch(baseSpec({ budget_usd: 5 }) as never)).toThrow(/cannot be enforced/);
+  });
+
+  test("preflight refuses artifact paths that escape the workdir", async () => {
+    const { launch } = await import("../src/core/launch");
+    expect(() => launch(baseSpec({ artifacts: ["../spec.json"] }) as never)).toThrow(/escapes the run workdir/);
+    expect(() => launch(baseSpec({ artifacts: ["/etc/passwd"] }) as never)).toThrow(/escapes the run workdir/);
+  });
+
+  test("preflight refuses invalid cap values", async () => {
+    const { launch } = await import("../src/core/launch");
+    expect(() => launch(baseSpec({ max_minutes: -5 }) as never)).toThrow(/finite positive/);
+    expect(() => launch(baseSpec({ max_minutes: Number.NaN }) as never)).toThrow(/finite positive/);
+  });
+
+  test("preflight refuses a non-git --cwd instead of silently hiding inputs", async () => {
+    const { launch } = await import("../src/core/launch");
+    const plainDir = mkdtempSync(join(tmpdir(), "mc-nongit-"));
+    try {
+      expect(() => launch(baseSpec({ cwd: plainDir }) as never)).toThrow(/not a git repository/);
+    } finally {
+      rmSync(plainDir, { recursive: true, force: true });
+    }
+  });
+
+  test("unreadable native stream caps the verdict at unverifiable (parser health)", async () => {
+    const { launch } = await import("../src/core/launch");
+    const { getRun } = await import("../src/core/db");
+
+    const run = launch(baseSpec({ goal: "drift simulation RAWLINES", artifacts: ["out.txt"] }) as never);
+    const done = await waitTerminal(() => getRun(run.id));
+    // Artifact exists and exit is 0, but mc was blind - never verified.
+    expect(done.exit).toBe("succeeded");
+    expect(done.verdict).toBe("unverifiable");
+    expect(done.verify_evidence).toContain("parser_health");
   });
 });

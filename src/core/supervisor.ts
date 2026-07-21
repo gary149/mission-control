@@ -48,8 +48,9 @@ export async function supervise(runId: string): Promise<void> {
   const { argv, env } = adapter.buildCommand(ctx);
 
   // Vendor CLIs can echo auth material on a 401; scrub the values we injected
-  // from everything we persist (SPEC: auth security invariants).
-  const secrets = auth.credential ? [auth.credential.value] : [];
+  // from everything we persist (SPEC: auth security invariants). Degenerate
+  // short values are skipped - replacing them would shred ordinary text.
+  const secrets = auth.credential ? [auth.credential.value].filter((s) => s.length >= 8) : [];
   const scrub = (s: string): string => {
     let out = s;
     for (const secret of secrets) out = out.replaceAll(secret, "***");
@@ -65,8 +66,8 @@ export async function supervise(runId: string): Promise<void> {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  updateRun(runId, { exit: "running", pid: child.pid ?? null });
-  insertEvent(runId, "status_change", { exit: "running", pid: child.pid });
+  updateRun(runId, { exit: "running", pid: child.pid ?? null, supervisor_pid: process.pid });
+  insertEvent(runId, "status_change", { exit: "running", pid: child.pid, supervisor_pid: process.pid });
 
   let killedByCap: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -78,13 +79,22 @@ export async function supervise(runId: string): Promise<void> {
     }, run.max_minutes * 60_000);
   }
 
+  // Parser health: blindness (unparsed lines, or never seeing a terminal result
+  // event) must cap the verdict at unverifiable, not pass silently.
+  let parseErrors = 0;
+  let sawResult = false;
+
   const updates: Record<string, unknown> = {};
   const stdoutLines = createInterface({ input: child.stdout! });
   stdoutLines.on("line", (line) => {
     const clean = scrub(line);
     stdoutFile.write(clean + "\n");
     const mapped = adapter.mapLine(clean);
-    for (const event of mapped.events) insertEvent(runId, event.kind, event.payload);
+    for (const event of mapped.events) {
+      if (event.kind === "error") parseErrors++;
+      if (event.kind === "turn_end") sawResult = true;
+      insertEvent(runId, event.kind, event.payload);
+    }
     if (mapped.update) {
       const { session_ref, cost_usd, tokens_in, tokens_out } = mapped.update;
       if (session_ref) updates.session_ref = session_ref;
@@ -106,26 +116,30 @@ export async function supervise(runId: string): Promise<void> {
   const stderrLines = createInterface({ input: child.stderr! });
   stderrLines.on("line", (line) => stderrFile.write(scrub(line) + "\n"));
 
-  const exitCode: number | null = await new Promise((resolveWait) => {
-    child.on("close", (code) => resolveWait(code));
-    child.on("error", (error) => {
-      insertEvent(runId, "error", { note: "spawn-failed", message: String(error) });
-      resolveWait(null);
-    });
-  });
+  const { exitCode, signal } = await new Promise<{ exitCode: number | null; signal: string | null }>(
+    (resolveWait) => {
+      child.on("close", (code, sig) => resolveWait({ exitCode: code, signal: sig }));
+      child.on("error", (error) => {
+        insertEvent(runId, "error", { note: "spawn-failed", message: String(error) });
+        resolveWait({ exitCode: null, signal: null });
+      });
+    },
+  );
   if (timer) clearTimeout(timer);
   stdoutFile.end();
   stderrFile.end();
 
-  // `mc kill` marks the run before signalling; preserve that classification.
+  // Classification: a run is `killed` only once the process actually died from
+  // a signal (cap or `mc kill`); the CLI never pre-marks terminal state.
   const current = getRun(runId)!;
   let exit: Run["exit"];
-  if (current.exit === "killed" || killedByCap) exit = "killed";
+  if (killedByCap || signal != null) exit = "killed";
   else if (exitCode === 0) exit = "succeeded";
   else exit = "failed";
   if (killedByCap) insertEvent(runId, "error", { note: "cap-exceeded", detail: killedByCap });
 
-  const verification = verify({ ...current, exit } as Run, spec, exitCode, isGit);
+  const parserHealthy = parseErrors === 0 && sawResult;
+  const verification = verify({ ...current, exit } as Run, spec, exitCode, isGit, parserHealthy);
   insertEvent(runId, "verify_result", { verdict: verification.verdict, checks: JSON.parse(verification.evidence) });
 
   updateRun(runId, {

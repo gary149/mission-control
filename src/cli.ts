@@ -28,14 +28,25 @@ function pidAlive(pid: number | null): boolean {
   }
 }
 
-/** Detect supervisor death: running row + dead pid = lost, a first-class outcome. */
+/**
+ * Detect watcher death: a running row whose SUPERVISOR is gone is lost - even
+ * if the harness process itself is still alive, nobody is logging, capping,
+ * verifying, or notifying it anymore.
+ */
 async function reapLostRuns(runs: Run[]): Promise<Run[]> {
   const config = loadConfig();
   const out: Run[] = [];
   for (const run of runs) {
-    if (run.exit === "running" && !pidAlive(run.pid)) {
+    const watcherPid = run.supervisor_pid ?? run.pid;
+    if (run.exit === "running" && !pidAlive(watcherPid)) {
+      const orphanedHarness = run.supervisor_pid != null && pidAlive(run.pid);
       updateRun(run.id, { exit: "lost", ended_at: new Date().toISOString() });
-      insertEvent(run.id, "exited", { exit: "lost", note: "supervisor or harness died without a terminal row" });
+      insertEvent(run.id, "exited", {
+        exit: "lost",
+        note: orphanedHarness
+          ? `supervisor died; harness pid ${run.pid} may still be running unwatched`
+          : "supervisor or harness died without a terminal row",
+      });
       const lost = getRun(run.id)!;
       await notifyTerminal(lost, config);
       out.push(lost);
@@ -77,12 +88,17 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       if (value === undefined) fail(`${arg} requires a value`);
       return value;
     };
+    const nextPositive = () => {
+      const value = Number(next());
+      if (!Number.isFinite(value) || value <= 0) fail(`${arg} must be a finite positive number`);
+      return value;
+    };
     switch (arg) {
       case "--harness": harness = next(); break;
       case "--model": model = next(); break;
       case "--cwd": cwd = next(); break;
-      case "--budget": budget = Number(next()); break;
-      case "--max-minutes": maxMinutes = Number(next()); break;
+      case "--budget": budget = nextPositive(); break;
+      case "--max-minutes": maxMinutes = nextPositive(); break;
       case "--gateway": gateway = next(); break;
       case "--api-key": apiKey = true; break;
       case "--visual": visual = true; break;
@@ -207,9 +223,9 @@ export async function cliMain(argv: string[]): Promise<void> {
       case "kill": {
         const run = requireRun(args[0]);
         if (run.exit !== "running") fail(`run ${run.id} is not running (exit=${run.exit})`);
-        // Mark first so the supervisor classifies the close as killed, not failed.
-        updateRun(run.id, { exit: "killed" });
-        insertEvent(run.id, "status_change", { exit: "killed", by: "mc kill" });
+        // Request only - the run stays `running` until the supervisor observes
+        // the process actually die (close signal) and writes the terminal row.
+        insertEvent(run.id, "status_change", { kill_requested: true, by: "mc kill" });
         if (run.pid) {
           try {
             process.kill(run.pid, "SIGTERM");
@@ -217,7 +233,7 @@ export async function cliMain(argv: string[]): Promise<void> {
             /* already gone; reap on next ls */
           }
         }
-        console.log(`killed ${run.id}`);
+        console.log(`kill requested for ${run.id} (mc tail ${run.id} to watch it land)`);
         break;
       }
 

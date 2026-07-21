@@ -53,6 +53,13 @@ export function resolveAuth(spec: RunSpec, adapter: HarnessAdapter, config: McCo
         `Drop --budget and use --max-minutes, or rerun with --api-key for a metered run.`,
     );
   }
+  // Even metered claude-code reports cost only in the terminal result event, so
+  // a dollar cap could never fire mid-run. Refuse loudly, never accepted-but-inert.
+  if (spec.budget_usd != null && adapter.name === "claude-code") {
+    throw new PreflightError(
+      `--budget cannot be enforced for claude-code (cost is reported only when the run ends); use --max-minutes instead`,
+    );
+  }
 
   if (mode === "subscription") {
     if (adapter.name === "claude-code") {

@@ -26,6 +26,15 @@ if (dumpMatch) {
   writeFileSync(dumpMatch[1]!, JSON.stringify(process.env, null, 2));
 }
 
+// RAWLINES: emit an unreadable native stream (format-drift simulation) - the
+// artifact appears and exit is 0, but no valid event ever parsed.
+if (prompt.includes("RAWLINES")) {
+  console.log("this is not json at all");
+  console.log("neither is this line");
+  writeFileSync("out.txt", "deliverable content\n");
+  process.exit(0);
+}
+
 const emit = (obj: unknown) => console.log(JSON.stringify(obj));
 
 emit({ type: "system", subtype: "init", session_id: "fake-session-123", model: "fake-model" });

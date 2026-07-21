@@ -48,6 +48,7 @@ export interface Run {
   auth_mode: AuthMode;
   gateway: string | null;
   pid: number | null;
+  supervisor_pid: number | null;
   stderr_path: string;
   artifacts: string[];
   verify_evidence: string | null;

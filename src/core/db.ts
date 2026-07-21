@@ -37,6 +37,7 @@ export function openDb(): Database {
       auth_mode TEXT NOT NULL,
       gateway TEXT,
       pid INTEGER,
+      supervisor_pid INTEGER,
       stderr_path TEXT NOT NULL,
       artifacts TEXT NOT NULL,
       verify_evidence TEXT,
@@ -76,7 +77,7 @@ const RUN_COLUMNS = [
   "id", "parent_run_id", "root_run_id", "harness", "model", "host", "goal", "title",
   "spec_path", "workdir", "session_ref", "exit", "verdict", "started_at", "ended_at",
   "cost_usd", "cost_basis", "tokens_in", "tokens_out", "budget_usd", "max_minutes",
-  "auth_mode", "gateway", "pid", "stderr_path", "artifacts", "verify_evidence", "notified",
+  "auth_mode", "gateway", "pid", "supervisor_pid", "stderr_path", "artifacts", "verify_evidence", "notified",
 ] as const;
 
 export function insertRun(run: Run): void {
