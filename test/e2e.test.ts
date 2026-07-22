@@ -148,6 +148,23 @@ describe("mission-control e2e (stub harness)", () => {
     ).toThrow(/cannot be enforced.*--max-minutes/);
   });
 
+  test("help covers every command and flag, and -h never launches a run", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const help = Bun.spawnSync(["bun", entry, "help"], { env: { ...process.env } }).stdout.toString();
+    for (const expected of [
+      "run", "ls", "show", "tail", "kill", "harness ls",
+      "--harness", "--model", "--cwd", "--artifact", "--visual",
+      "--max-minutes", "--budget", "--gateway", "--api-key", "--spec",
+      "subscription", "MC_HOME", "config.toml",
+    ]) {
+      expect(help).toContain(expected);
+    }
+    // `mc run -h` must print help, not launch a run with goal "-h".
+    const runH = Bun.spawnSync(["bun", entry, "run", "-h"], { env: { ...process.env } });
+    expect(runH.stdout.toString()).toContain("USAGE");
+    expect(runH.exitCode).toBe(0);
+  });
+
   test("TOML parser keeps '#' inside quoted values", async () => {
     const { loadConfig } = await import("../src/core/config");
     const { writeFileSync, readFileSync } = await import("node:fs");
