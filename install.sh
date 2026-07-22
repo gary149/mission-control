@@ -22,10 +22,6 @@ sign_darwin() {
 }
 
 if [ "${1:-}" = "--from-release" ]; then
-  command -v gh >/dev/null 2>&1 || {
-    echo "mc install: --from-release requires the gh CLI (repo is private; downloads need auth)" >&2
-    exit 1
-  }
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   arch="$(uname -m)"
   case "$arch" in
@@ -35,7 +31,8 @@ if [ "${1:-}" = "--from-release" ]; then
   asset="mc-$os-$arch"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  gh release download latest --pattern "$asset" --output "$tmp/mc" --clobber
+  # Public repo: anonymous download; tag-path URL because `latest` is a prerelease.
+  curl -fsSL -o "$tmp/mc" "https://github.com/gary149/mission-control/releases/download/latest/$asset"
   chmod +x "$tmp/mc"
   sign_darwin "$tmp/mc"
   mkdir -p "$PREFIX"
