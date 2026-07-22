@@ -7,25 +7,42 @@ declared outputs, and pushes you the truth.
 See [SPEC.md](./SPEC.md) for the full design, [CONTEXT.md](./CONTEXT.md) for the domain
 glossary, and [docs/adr/](./docs/adr/) for the decisions.
 
-## v0
+## Install
 
-Requires [Bun](https://bun.sh). One harness adapter (claude-code), all three auth modes.
+Building requires [Bun](https://bun.sh); the installed `mc` is a single self-contained
+binary with no runtime dependency.
 
 ```sh
-bun src/mc.ts help
+git clone https://github.com/gary149/mission-control && cd mission-control
+./install.sh                      # -> ~/.local/bin/mc
+# PREFIX=/usr/local/bin ./install.sh   for a system-wide install
+```
+
+For a Linux host (e.g. your remote box): run the same `./install.sh` on it, or
+cross-compile from anywhere with `bun run build:linux` and copy `dist/mc-linux-x64` over.
+
+For development, `bun link` exposes the source entrypoint as `mc`, or use
+`bun src/mc.ts ...` directly.
+
+## Use
+
+v0 ships one harness adapter (claude-code) with all three auth modes.
+
+```sh
+mc help
 
 # Subscription (default; uses the CLI's own resident login):
-bun src/mc.ts run --harness claude-code --artifact out/report.md "write the report"
+mc run --harness claude-code --artifact out/report.md "write the report"
 
 # Any model via OpenRouter (key must be resident on this host):
-bun src/mc.ts run --harness claude-code --gateway openrouter \
+mc run --harness claude-code --gateway openrouter \
   --model moonshotai/kimi-k3 --max-minutes 30 --artifact hello.txt "..."
 
-bun src/mc.ts ls            # what ran, both status axes, cost, age
-bun src/mc.ts tail <id>     # follow the normalized event stream
-bun src/mc.ts show <id>     # full run record + verification evidence
-bun src/mc.ts kill <id>
-bun src/mc.ts harness ls    # adapters, capabilities, live auth probes
+mc ls            # what ran, both status axes, cost, age
+mc tail <id>     # follow the normalized event stream
+mc show <id>     # full run record + verification evidence
+mc kill <id>
+mc harness ls    # adapters, capabilities, live auth probes
 ```
 
 State lives in `~/.mission-control/` (override with `MC_HOME`): `mc.db` (runs + events),
