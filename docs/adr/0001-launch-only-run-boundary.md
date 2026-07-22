@@ -25,7 +25,7 @@ cross-host ids or lineage.
   row exists.
 - Hand-started work stays untracked by design; the remedy is "launch it through mc," not
   adoption. Historical visibility of everything else is agentsview's job, reachable via
-  session_ref.
+  session_id.
 - The ledger's semantics never depend on harness-specific discovery heuristics, which is
   what made openclaw's two-schema split (native vs ACP) unfixable.
 - If a genuine adoption need emerges, it must come back through this ADR, likely as an
