@@ -19,11 +19,11 @@ export function openDb(): Database {
       harness TEXT NOT NULL,
       model TEXT,
       host TEXT NOT NULL,
-      goal TEXT NOT NULL,
+      prompt TEXT NOT NULL,
       title TEXT NOT NULL,
       spec_path TEXT NOT NULL,
       workdir TEXT NOT NULL,
-      session_ref TEXT,
+      session_id TEXT,
       exit TEXT NOT NULL,
       verdict TEXT NOT NULL,
       started_at TEXT NOT NULL,
@@ -52,7 +52,18 @@ export function openDb(): Database {
       PRIMARY KEY (run_id, seq)
     );
   `);
+  migrate(db);
   return db;
+}
+
+/** Rename-only migrations for pre-claude-shape databases (goal/session_ref era). */
+function migrate(d: Database): void {
+  const columns = d
+    .query<{ name: string }, []>("PRAGMA table_info(runs)")
+    .all()
+    .map((c) => c.name);
+  if (columns.includes("goal")) d.exec("ALTER TABLE runs RENAME COLUMN goal TO prompt");
+  if (columns.includes("session_ref")) d.exec("ALTER TABLE runs RENAME COLUMN session_ref TO session_id");
 }
 
 /** Test-only: drop the cached handle so a new MC_HOME takes effect. */
@@ -74,8 +85,8 @@ function dollarKeys(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 const RUN_COLUMNS = [
-  "id", "parent_run_id", "root_run_id", "harness", "model", "host", "goal", "title",
-  "spec_path", "workdir", "session_ref", "exit", "verdict", "started_at", "ended_at",
+  "id", "parent_run_id", "root_run_id", "harness", "model", "host", "prompt", "title",
+  "spec_path", "workdir", "session_id", "exit", "verdict", "started_at", "ended_at",
   "cost_usd", "cost_basis", "tokens_in", "tokens_out", "budget_usd", "max_minutes",
   "auth_mode", "gateway", "pid", "supervisor_pid", "stderr_path", "artifacts", "verify_evidence", "notified",
 ] as const;

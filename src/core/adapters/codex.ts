@@ -60,7 +60,7 @@ export const codex: HarnessAdapter = {
     if (ctx.credential) env[ctx.credential.envVar] = ctx.credential.value;
 
     const argv = [ctx.binPath, "exec"];
-    if (ctx.resumeSession) argv.push("resume", ctx.resumeSession);
+    if (ctx.resumeSessionId) argv.push("resume", ctx.resumeSessionId);
     argv.push("--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox");
 
     if (spec.auth.mode === "gateway") {
@@ -79,7 +79,7 @@ export const codex: HarnessAdapter = {
     }
     if (spec.model) argv.push("-m", spec.model);
 
-    let prompt = spec.goal;
+    let prompt = spec.prompt;
     if (spec.artifacts.length > 0) {
       prompt += `\n\nWrite the deliverables to these exact paths (relative to the working directory): ${spec.artifacts.join(", ")}`;
     }
@@ -101,7 +101,7 @@ export const codex: HarnessAdapter = {
     switch (obj?.type) {
       case "thread.started":
         events.push({ kind: "started", payload: { session_id: obj.thread_id } });
-        if (obj.thread_id) update = { session_ref: obj.thread_id };
+        if (obj.thread_id) update = { session_id: obj.thread_id };
         break;
       case "turn.started":
       case "item.started":

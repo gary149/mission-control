@@ -14,7 +14,7 @@ export type CostBasis = "flat_subscription" | "metered_reported" | "unavailable"
 export interface RunSpec {
   harness: string;
   model: string | null;
-  goal: string;
+  prompt: string;
   cwd: string | null;
   artifacts: string[];
   visual: boolean;
@@ -30,11 +30,11 @@ export interface Run {
   harness: string;
   model: string | null;
   host: string;
-  goal: string;
+  prompt: string;
   title: string;
   spec_path: string;
   workdir: string;
-  session_ref: string | null;
+  session_id: string | null;
   exit: ExitStatus;
   verdict: Verdict;
   started_at: string;

@@ -43,7 +43,7 @@ function baseSpec(overrides: Record<string, unknown>) {
   return {
     harness: "claude-code",
     model: null,
-    goal: "test goal",
+    prompt: "test prompt",
     cwd: null,
     artifacts: [] as string[],
     visual: false,
@@ -62,7 +62,7 @@ describe("mission-control e2e (stub harness)", () => {
     const envDump = join(home, "child-env.json");
     const run = launch(
       baseSpec({
-        goal: `produce out.txt for the e2e test DUMPENV:${envDump}`,
+        prompt: `produce out.txt for the e2e test DUMPENV:${envDump}`,
         artifacts: ["out.txt"],
       }) as never,
     );
@@ -75,7 +75,7 @@ describe("mission-control e2e (stub harness)", () => {
     expect(done.cost_usd).toBe(0.42);
     expect(done.tokens_in).toBe(1000);
     expect(done.tokens_out).toBe(250);
-    expect(done.session_ref).toBe("fake-session-123");
+    expect(done.session_id).toBe("fake-session-123");
     expect(existsSync(join(done.workdir, "out.txt"))).toBe(true);
 
     // Event stream has the normalized shape.
@@ -104,7 +104,7 @@ describe("mission-control e2e (stub harness)", () => {
     const { launch } = await import("../src/core/launch");
     const { getRun } = await import("../src/core/db");
 
-    const run = launch(baseSpec({ goal: "fail on purpose FAIL LEAK", artifacts: ["out.txt"] }) as never);
+    const run = launch(baseSpec({ prompt: "fail on purpose FAIL LEAK", artifacts: ["out.txt"] }) as never);
     const done = await waitTerminal(() => getRun(run.id));
 
     expect(done.exit).toBe("failed");
@@ -120,7 +120,7 @@ describe("mission-control e2e (stub harness)", () => {
     const { launch } = await import("../src/core/launch");
     const { getRun } = await import("../src/core/db");
 
-    const run = launch(baseSpec({ goal: "make something pretty", artifacts: ["out.txt"], visual: true }) as never);
+    const run = launch(baseSpec({ prompt: "make something pretty", artifacts: ["out.txt"], visual: true }) as never);
     const done = await waitTerminal(() => getRun(run.id));
     expect(done.exit).toBe("succeeded");
     expect(done.verdict).toBe("needs_human_look");
@@ -130,7 +130,7 @@ describe("mission-control e2e (stub harness)", () => {
     const { launch } = await import("../src/core/launch");
     const { getRun } = await import("../src/core/db");
 
-    const run = launch(baseSpec({ goal: "no artifacts declared" }) as never);
+    const run = launch(baseSpec({ prompt: "no artifacts declared" }) as never);
     const done = await waitTerminal(() => getRun(run.id));
     expect(done.exit).toBe("succeeded");
     expect(done.verdict).toBe("unverifiable");
@@ -163,7 +163,7 @@ describe("mission-control e2e (stub harness)", () => {
     ]) {
       expect(help).toContain(expected);
     }
-    // `mc run -h` must print help, not launch a run with goal "-h".
+    // `mc run -h` must print help, not launch a run with prompt "-h".
     const runH = Bun.spawnSync(["bun", entry, "run", "-h"], { env: { ...process.env } });
     expect(runH.stdout.toString()).toContain("USAGE");
     expect(runH.exitCode).toBe(0);
@@ -178,7 +178,7 @@ describe("mission-control e2e (stub harness)", () => {
     const run = launch(
       baseSpec({
         harness: "codex",
-        goal: `produce out.txt DUMPENV:${envDump}`,
+        prompt: `produce out.txt DUMPENV:${envDump}`,
         artifacts: ["out.txt"],
         auth: { mode: "api_key" },
       }) as never,
@@ -187,7 +187,7 @@ describe("mission-control e2e (stub harness)", () => {
     const done = await waitTerminal(() => getRun(run.id));
     expect(done.exit).toBe("succeeded");
     expect(done.verdict).toBe("verified");
-    expect(done.session_ref).toBe("fake-thread-0001");
+    expect(done.session_id).toBe("fake-thread-0001");
     expect(done.tokens_in).toBe(500);
     expect(done.tokens_out).toBe(80);
     expect(done.cost_usd).toBeNull(); // codex never reports dollars, any mode
@@ -215,7 +215,7 @@ describe("mission-control e2e (stub harness)", () => {
       baseSpec({
         harness: "pi",
         model: "fake/model",
-        goal: `produce out.txt DUMPENV:${envDump}`,
+        prompt: `produce out.txt DUMPENV:${envDump}`,
         artifacts: ["out.txt"],
         auth: { mode: "gateway", gateway: "openrouter" },
       }) as never,
@@ -224,7 +224,7 @@ describe("mission-control e2e (stub harness)", () => {
     const done = await waitTerminal(() => getRun(run.id));
     expect(done.exit).toBe("succeeded");
     expect(done.verdict).toBe("verified");
-    expect(done.session_ref).toBe("019f0000-fake-7000-a000-000000000001");
+    expect(done.session_id).toBe("019f0000-fake-7000-a000-000000000001");
     // Two turns at 0.001 each and (2000+1000)/(20+30) tokens - deltas must SUM.
     expect(done.cost_usd).toBeCloseTo(0.002, 5);
     expect(done.tokens_in).toBe(3000);
@@ -244,7 +244,7 @@ describe("mission-control e2e (stub harness)", () => {
       baseSpec({
         harness: "pi",
         model: "fake/model",
-        goal: "spend too much OVERBUDGET",
+        prompt: "spend too much OVERBUDGET",
         artifacts: ["out.txt"],
         budget_usd: 1,
         auth: { mode: "gateway", gateway: "openrouter" },
@@ -281,18 +281,18 @@ describe("mission-control e2e (stub harness)", () => {
     const parentRun = launch(
       baseSpec({
         harness: "codex",
-        goal: "first step: produce out.txt",
+        prompt: "first step: produce out.txt",
         artifacts: ["out.txt"],
         auth: { mode: "api_key" },
       }) as never,
     );
     const parent = await waitTerminal(() => getRun(parentRun.id));
-    expect(parent.session_ref).toBe("fake-thread-0001");
+    expect(parent.session_id).toBe("fake-thread-0001");
 
     const resumed = launch(
       baseSpec({
         harness: "codex",
-        goal: "second step: append",
+        prompt: "second step: append",
         artifacts: ["out.txt"],
         auth: { mode: "api_key" },
       }) as never,
@@ -304,21 +304,21 @@ describe("mission-control e2e (stub harness)", () => {
 
     const resumedDone = await waitTerminal(() => getRun(resumed.id));
     expect(resumedDone.exit).toBe("succeeded");
-    expect(resumedDone.session_ref).toBe(parent.session_ref); // continued, not fresh
+    expect(resumedDone.session_id).toBe(parent.session_id); // continued, not fresh
     const content = readFileSync(join(parent.workdir, "out.txt"), "utf8");
     expect(content).toContain("resumed OK"); // the fake appends only under exec resume
   });
 
-  test("resume: refused for a parent without a session_ref", async () => {
+  test("resume: refused for a parent without a session_id", async () => {
     const { launch } = await import("../src/core/launch");
     const { getRun, updateRun } = await import("../src/core/db");
     const parentRun = launch(
-      baseSpec({ harness: "codex", goal: "x", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
+      baseSpec({ harness: "codex", prompt: "x", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
     );
     const parent = await waitTerminal(() => getRun(parentRun.id));
-    updateRun(parent.id, { session_ref: null });
+    updateRun(parent.id, { session_id: null });
     expect(() =>
-      launch(baseSpec({ harness: "codex", goal: "y", auth: { mode: "api_key" } }) as never, {
+      launch(baseSpec({ harness: "codex", prompt: "y", auth: { mode: "api_key" } }) as never, {
         parent: getRun(parent.id)!,
       }),
     ).toThrow(/no session reference/);
@@ -333,7 +333,7 @@ describe("mission-control e2e (stub harness)", () => {
         binPath: "/bin/echo",
         workdir: join(home, "cap-check-work"),
         credential: { envVar: "X_KEY", value: "x-not-real-x" },
-        resumeSession: "SESSION-REF-123",
+        resumeSessionId: "SESSION-REF-123",
       });
       expect(argv.join(" ")).toContain("SESSION-REF-123");
     }
@@ -372,7 +372,7 @@ describe("mission-control e2e (stub harness)", () => {
     const run = launch(
       baseSpec({
         model: "moonshotai/kimi-k3",
-        goal: `gateway wiring test DUMPENV:${envDump}`,
+        prompt: `gateway wiring test DUMPENV:${envDump}`,
         artifacts: ["out.txt"],
         auth: { mode: "gateway", gateway: "openrouter" },
       }) as never,
@@ -427,7 +427,7 @@ describe("mission-control e2e (stub harness)", () => {
     const { launch } = await import("../src/core/launch");
     const { getRun } = await import("../src/core/db");
 
-    const run = launch(baseSpec({ goal: "drift simulation RAWLINES", artifacts: ["out.txt"] }) as never);
+    const run = launch(baseSpec({ prompt: "drift simulation RAWLINES", artifacts: ["out.txt"] }) as never);
     const done = await waitTerminal(() => getRun(run.id));
     // Artifact exists and exit is 0, but mc was blind - never verified.
     expect(done.exit).toBe("succeeded");
