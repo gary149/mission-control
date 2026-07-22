@@ -15,18 +15,22 @@ linux-arm64) via GitHub Actions.
 
 ```sh
 git clone https://github.com/gary149/mission-control && cd mission-control
-./install.sh --from-release       # download prebuilt (needs gh auth; repo is private)
+./install.sh --from-release       # download prebuilt (no toolchain needed)
 # or build from source (needs bun):
 ./install.sh
 # PREFIX=/usr/local/bin ./install.sh   for a system-wide install
 ```
 
-No-clone install on any authed machine (e.g. the remote box):
+No-clone install on any machine (e.g. a Linux server; no auth, no toolchain):
 
 ```sh
-gh release download latest -R gary149/mission-control -p "mc-linux-x64" -O ~/.local/bin/mc
+curl -fsSL --create-dirs -o ~/.local/bin/mc \
+  https://github.com/gary149/mission-control/releases/download/latest/mc-linux-x64
 chmod +x ~/.local/bin/mc
 ```
+
+(macOS: use `./install.sh --from-release` instead - downloaded binaries must be
+ad-hoc signed or arm64 kills them at launch; the installer handles it.)
 
 macOS note: downloaded binaries must be ad-hoc signed or arm64 kills them at launch;
 `install.sh` does this automatically (`codesign --remove-signature` + `--force --sign -`).
