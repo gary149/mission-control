@@ -6,6 +6,9 @@
   "bin": { "mc": "src/mc.ts" },
   "scripts": {
     "mc": "bun src/mc.ts",
+    "build": "bun build src/mc.ts --compile --outfile dist/mc",
+    "build:linux": "bun build src/mc.ts --compile --target=bun-linux-x64 --outfile dist/mc-linux-x64",
+    "install:local": "./install.sh",
     "test": "bun test"
   },
   "devDependencies": {
