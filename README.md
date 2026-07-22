@@ -9,17 +9,27 @@ glossary, and [docs/adr/](./docs/adr/) for the decisions.
 
 ## Install
 
-Building requires [Bun](https://bun.sh); the installed `mc` is a single self-contained
-binary with no runtime dependency.
+`mc` is a single self-contained binary with no runtime dependency. Every push to main
+rebuilds the rolling [`latest` release](../../releases/latest) (darwin-arm64, linux-x64,
+linux-arm64) via GitHub Actions.
 
 ```sh
 git clone https://github.com/gary149/mission-control && cd mission-control
-./install.sh                      # -> ~/.local/bin/mc
+./install.sh --from-release       # download prebuilt (needs gh auth; repo is private)
+# or build from source (needs bun):
+./install.sh
 # PREFIX=/usr/local/bin ./install.sh   for a system-wide install
 ```
 
-For a Linux host (e.g. your remote box): run the same `./install.sh` on it, or
-cross-compile from anywhere with `bun run build:linux` and copy `dist/mc-linux-x64` over.
+No-clone install on any authed machine (e.g. the remote box):
+
+```sh
+gh release download latest -R gary149/mission-control -p "mc-linux-x64" -O ~/.local/bin/mc
+chmod +x ~/.local/bin/mc
+```
+
+macOS note: downloaded binaries must be ad-hoc signed or arm64 kills them at launch;
+`install.sh` does this automatically (`codesign --remove-signature` + `--force --sign -`).
 
 For development, `bun link` exposes the source entrypoint as `mc`, or use
 `bun src/mc.ts ...` directly.
