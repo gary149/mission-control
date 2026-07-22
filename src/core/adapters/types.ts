@@ -14,15 +14,22 @@ export interface LaunchContext {
   gatewayCfg?: GatewayConfig;
   credential?: { envVar: string; value: string };
   workdir: string;
+  /** Harness-native session reference to resume (mc resume); adapter maps it to native flags. */
+  resumeSession?: string;
 }
 
 export interface MappedLine {
   events: { kind: EventKind; payload: unknown }[];
   update?: {
     session_ref?: string;
+    /** Absolute totals (harness reports a final figure once, e.g. claude's result event). */
     cost_usd?: number;
     tokens_in?: number;
     tokens_out?: number;
+    /** Per-turn increments (harness reports per turn, e.g. pi/codex); supervisor accumulates. */
+    cost_usd_delta?: number;
+    tokens_in_delta?: number;
+    tokens_out_delta?: number;
     result_text?: string;
   };
 }

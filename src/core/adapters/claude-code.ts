@@ -74,6 +74,7 @@ export const claudeCode: HarnessAdapter = {
       "--verbose",
       "--dangerously-skip-permissions",
     ];
+    if (ctx.resumeSession) argv.push("--resume", ctx.resumeSession);
     if (spec.model && spec.auth.mode !== "gateway") argv.push("--model", spec.model);
     if (spec.auth.mode === "gateway") argv.push("--model", spec.model!);
     argv.push(prompt);
@@ -92,8 +93,9 @@ export const claudeCode: HarnessAdapter = {
     let update: MappedLine["update"];
 
     // Known-benign native noise, deliberately skipped (not format drift):
-    // hook lifecycle chatter and internal thinking blocks.
-    const BENIGN_SYSTEM = /^hook_/;
+    // hook lifecycle chatter, streaming thinking-token counters, and the CLI's
+    // own upstream-retry notices (observed live on OpenRouter/kimi runs).
+    const BENIGN_SYSTEM = /^(hook_|thinking_tokens$|api_retry$)/;
 
     switch (obj?.type) {
       case "system":
