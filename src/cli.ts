@@ -176,7 +176,70 @@ async function readSpecFromStdin(): Promise<RunSpec> {
   };
 }
 
+function printHelp(): void {
+  const build = process.env.MC_BUILD ? ` (${process.env.MC_BUILD})` : "";
+  const harnesses = ADAPTERS.map((a) => a.name).join(", ");
+  const gateways = Object.keys(loadConfig().gateways).join(", ");
+  console.log(`mission-control v0${build} - control plane for delegated agent runs
+
+USAGE
+  mc <command> [options]
+
+COMMANDS
+  run        Launch a tracked, isolated, verified run on a harness
+  ls         List runs; also reaps lost runs and re-delivers missed notifications
+  show <id>  Full run record, verification evidence, recent events
+  tail <id>  Follow a run's event stream until it terminates
+  kill <id>  Request termination (state lands when the process actually dies)
+  harness ls Adapters: capabilities, install status, live auth probes
+  help       This page (also: -h, --help anywhere)
+
+RUN OPTIONS
+  --harness H       Required. Registered: ${harnesses}
+  --model M         Model id; gateway mode needs a provider prefix (moonshotai/kimi-k3)
+  --cwd DIR         Git repo to work on; isolated via git worktree (non-git refused)
+  --artifact PATH   Declared deliverable, workdir-relative; the verifier checks it
+                    exists and is non-empty (repeatable)
+  --visual          Output needs human eyes; verdict terminates at needs_human_look
+  --max-minutes N   Wall-clock cap: kill + notify when exceeded
+  --budget N        Dollar cap; refused where no enforceable cost signal exists
+  --gateway NAME    Route via an LLM gateway. Known: ${gateways}
+  --api-key         Use the conventional API-key env var instead of the resident login
+  --spec -          Read a full RunSpec as JSON from stdin (the remote-safe form:
+                    ssh box mc run --spec - < task.json)
+
+AUTH (per run; default = subscription)
+  subscription   The harness CLI's own resident login on THIS host; mc adds nothing
+  api_key        Forwards exactly one env var resident on this host (ANTHROPIC_API_KEY)
+  gateway        OpenRouter-compatible routing; key env var must be resident here
+  Credentials never cross machines; missing ones fail closed at preflight.
+
+STATUS (two axes, never conflated)
+  exit      queued | running | succeeded | failed | killed | lost
+  verdict   pending | verified | failed_verification | unverifiable | needs_human_look
+  DONE means succeeded AND verified: declared checks passed, confirmed mechanically,
+  never taken from the agent's own claims.
+
+FILES & ENV
+  ~/.mission-control/       state root (override: MC_HOME)
+    mc.db                   runs + events (SQLite; any tool can read it)
+    runs/<id>/              spec.json, work/, stdout.jsonl, stderr.log
+    config.toml             [notify] exec/webhook hooks; [gateway.NAME] blocks
+  MC_CLAUDE_BIN             override the claude binary path (pinning/testing)
+
+EXAMPLES
+  mc run --harness claude-code --artifact out/report.md "write the report"
+  mc run --harness claude-code --gateway openrouter --model moonshotai/kimi-k3 \\
+        --max-minutes 30 --artifact hello.txt "build hello.txt"
+  mc ls --json | jq '.[0].verdict'
+  mc harness ls`);
+}
+
 export async function cliMain(argv: string[]): Promise<void> {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    printHelp();
+    return;
+  }
   const [command, ...args] = argv;
 
   try {
@@ -296,18 +359,7 @@ export async function cliMain(argv: string[]): Promise<void> {
 
       case "help":
       case undefined:
-        // MC_BUILD is inlined by the release build (--define); source runs show none.
-        console.log(`mission-control v0${process.env.MC_BUILD ? ` (${process.env.MC_BUILD})` : ""}
-
-usage:
-  mc run --harness H [--model M] [--cwd DIR] [--gateway NAME | --api-key]
-         [--budget N] [--max-minutes N] [--artifact PATH]... [--visual] "goal"
-  mc run --spec -          # full RunSpec as JSON on stdin
-  mc ls [--json]
-  mc show <run-id>
-  mc tail <run-id>
-  mc kill <run-id>
-  mc harness ls`);
+        printHelp();
         break;
 
       default:
