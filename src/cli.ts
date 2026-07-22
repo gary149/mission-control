@@ -296,7 +296,8 @@ export async function cliMain(argv: string[]): Promise<void> {
 
       case "help":
       case undefined:
-        console.log(`mission-control v0
+        // MC_BUILD is inlined by the release build (--define); source runs show none.
+        console.log(`mission-control v0${process.env.MC_BUILD ? ` (${process.env.MC_BUILD})` : ""}
 
 usage:
   mc run --harness H [--model M] [--cwd DIR] [--gateway NAME | --api-key]
