@@ -59,7 +59,7 @@ Hetzner box, plus deep reads of openclaw, omnigent, nanoclaw, pi-mono, agentsvie
 | 6 | Remote | Install per host; engine is SSH-free; driven via plain `ssh box mc ...` with specs over stdin (revised 2026-07-20, was: `--host` SSH sugar in mc) |
 | 7 | Notifications | Generic per-host `on_terminal` hook (exec and/or webhook); Telegram example config |
 | 8 | Follow-ups | `mc resume` = new run linked by `parent_run_id`, harness-native resume, capability-gated |
-| 9 | agentsview | Loose coupling: converge on conventions, store `session_ref`, zero dependency |
+| 9 | agentsview | Loose coupling: converge on conventions, store `session_id`, zero dependency |
 | 10 | V1 adapters | claude-code, codex, pi (one per integration style: stream-json, exec-json, RPC) |
 | 11 | Cost | Always record (unknown, never 0, when unparseable); opt-in per-run `--budget` kill; no global policy |
 | 12 | Capabilities | Static typed declarations in each adapter (agentsview pattern); `mc harness ls`; refuse-loudly |
@@ -81,11 +81,11 @@ interface Run {
   harness: string;                // "claude-code" | "codex" | "pi" | ...
   model: string | null;           // as passed to the harness
   host: string;                   // where it executed
-  goal: string;                   // the prompt/task text
-  title: string;                  // short human label, derived from goal at launch (UI rows)
+  prompt: string;                 // what the operator asked for, verbatim
+  title: string;                  // short human label, derived from the prompt at launch (UI rows)
   spec_path: string;              // the launch spec JSON, archived
   workdir: string;                // isolated per run, never shared, never the caller's cwd
-  session_ref: string | null;     // harness-native session id/path (agentsview jump point)
+  session_id: string | null;      // harness-native session id (agentsview jump point)
 
   exit: "queued" | "running" | "succeeded" | "failed" | "killed" | "lost";
   verdict: "pending" | "verified" | "failed_verification" | "unverifiable" | "needs_human_look";
@@ -205,12 +205,12 @@ runbook knowledge currently scattered across skill files, made executable:
   `--effort`; task context injected via `AGENTS.md` in the workdir (codex's native
   context channel — the proven gist-injection pattern, generalized).
 - **pi**: RPC mode; effort maps to the `:thinkingLevel` model suffix; session enabled
-  (never `--no-session`) so `session_ref` and resume stay possible.
+  (never `--no-session`) so `session_id` and resume stay possible.
 
 Two mechanisms keep this honest:
 
 1. **Spec-to-native translation is total or refused.** `--effort`, `--visual`, declared
-   artifacts, and the goal text are translated into each harness's native equivalents
+   artifacts, and the prompt text are translated into each harness's native equivalents
    (effort → env/config/suffix; artifacts → an appended one-line contract in the prompt:
    "write outputs to <paths>"). If a spec field has no native equivalent and no safe
    default, mc refuses by name — never silently drops (decision #12's rule, applied to
@@ -422,7 +422,7 @@ The CLI is a surface, not the product. Structure enforces this:
 
 ```
 mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N]
-          [--gateway NAME | --api-key] [--artifact PATH]... [--visual] [--effort E] "goal text"
+          [--gateway NAME | --api-key] [--artifact PATH]... [--visual] [--effort E] "prompt"
 mc run    --spec -            # full RunSpec as JSON on stdin (the remote-safe form)
 mc ls     [--json]
 mc show   <run-id>            # full record, both axes, verify evidence, cost
@@ -520,7 +520,7 @@ Each milestone is shippable and used daily before the next starts.
   interactive rows (answer a blocked run from the list) depend on steering.
 - `--host` client sugar and cross-host aggregation in `mc ls`: plain `ssh box mc ...`
   covers v1; revisit when `mc top` wants a merged multi-host view.
-- Cross-silo history search and cost analytics (agentsview's job; we store `session_ref`
+- Cross-silo history search and cost analytics (agentsview's job; we store `session_id`
   to jump into it).
 - A resident dispatcher agent (documented failure mode; revisit only with a strong model
   and a concrete trigger-from-phone need).
@@ -531,7 +531,7 @@ Each milestone is shippable and used daily before the next starts.
 
 - Codex resume: RESOLVED - `codex exec resume <session-id>` verified end-to-end by
   `mc harness check codex` (codex-cli 0.144.6, session continued, artifact appended).
-- Pi session_ref: RESOLVED - pi sessions live in the run dir via `--session-dir`; the
+- Pi session_id: RESOLVED - pi sessions live in the run dir via `--session-dir`; the
   session id resumes with `--session <id>`, verified by `mc harness check pi`.
 - `lost`-run detection cadence: on-demand at `mc ls` in v1; decide whether milestone 5
   needs a `mc reap` cron on the box.
