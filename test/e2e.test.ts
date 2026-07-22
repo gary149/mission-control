@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/fake-claude.ts", import.meta.url));
+const FIXTURE_CODEX = fileURLToPath(new URL("./fixtures/fake-codex.ts", import.meta.url));
+const FIXTURE_PI = fileURLToPath(new URL("./fixtures/fake-pi.ts", import.meta.url));
 
 let home: string;
 
@@ -12,11 +14,13 @@ beforeAll(() => {
   home = mkdtempSync(join(tmpdir(), "mc-test-"));
   process.env.MC_HOME = home;
   process.env.MC_CLAUDE_BIN = FIXTURE;
+  process.env.MC_CODEX_BIN = FIXTURE_CODEX;
+  process.env.MC_PI_BIN = FIXTURE_PI;
   process.env.ANTHROPIC_API_KEY = "sk-test-not-real";
   // Poison: resident on the host, must never reach a child (additive-from-empty env).
   process.env.OPENROUTER_API_KEY = "or-poison-not-real";
   process.env.HF_TOKEN = "hf-poison-not-real";
-  chmodSync(FIXTURE, 0o755);
+  for (const fixture of [FIXTURE, FIXTURE_CODEX, FIXTURE_PI]) chmodSync(fixture, 0o755);
   // Notify hook writes its payload to a file we can assert on.
   writeFileSync(join(home, "config.toml"), `[notify]\nexec = "cat > ${home}/notified.json"\n`);
 });
@@ -163,6 +167,176 @@ describe("mission-control e2e (stub harness)", () => {
     const runH = Bun.spawnSync(["bun", entry, "run", "-h"], { env: { ...process.env } });
     expect(runH.stdout.toString()).toContain("USAGE");
     expect(runH.exitCode).toBe(0);
+  });
+
+  test("codex: verified run, tokens without cost, scratch CODEX_HOME, clean env", async () => {
+    const { launch } = await import("../src/core/launch");
+    const { getRun } = await import("../src/core/db");
+    process.env.OPENAI_API_KEY = "sk-codex-test-not-real";
+
+    const envDump = join(home, "codex-env.json");
+    const run = launch(
+      baseSpec({
+        harness: "codex",
+        goal: `produce out.txt DUMPENV:${envDump}`,
+        artifacts: ["out.txt"],
+        auth: { mode: "api_key" },
+      }) as never,
+    );
+    expect(run.cost_basis).toBe("unavailable");
+    const done = await waitTerminal(() => getRun(run.id));
+    expect(done.exit).toBe("succeeded");
+    expect(done.verdict).toBe("verified");
+    expect(done.session_ref).toBe("fake-thread-0001");
+    expect(done.tokens_in).toBe(500);
+    expect(done.tokens_out).toBe(80);
+    expect(done.cost_usd).toBeNull(); // codex never reports dollars, any mode
+
+    const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
+    expect(childEnv.OPENAI_API_KEY).toBe("sk-codex-test-not-real");
+    expect(childEnv.CODEX_HOME).toContain("/codex-home"); // scratch, never ~/.codex
+    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(childEnv.OPENROUTER_API_KEY).toBeUndefined();
+  });
+
+  test("codex: --budget refused (no cost signal in any mode)", async () => {
+    const { launch } = await import("../src/core/launch");
+    expect(() =>
+      launch(baseSpec({ harness: "codex", budget_usd: 5, auth: { mode: "api_key" } }) as never),
+    ).toThrow(/--budget has no meaning/);
+  });
+
+  test("pi: verified run with ACCUMULATED per-turn cost and tokens (gateway mode)", async () => {
+    const { launch } = await import("../src/core/launch");
+    const { getRun } = await import("../src/core/db");
+
+    const envDump = join(home, "pi-env.json");
+    const run = launch(
+      baseSpec({
+        harness: "pi",
+        model: "fake/model",
+        goal: `produce out.txt DUMPENV:${envDump}`,
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    expect(run.cost_basis).toBe("metered_reported");
+    const done = await waitTerminal(() => getRun(run.id));
+    expect(done.exit).toBe("succeeded");
+    expect(done.verdict).toBe("verified");
+    expect(done.session_ref).toBe("019f0000-fake-7000-a000-000000000001");
+    // Two turns at 0.001 each and (2000+1000)/(20+30) tokens - deltas must SUM.
+    expect(done.cost_usd).toBeCloseTo(0.002, 5);
+    expect(done.tokens_in).toBe(3000);
+    expect(done.tokens_out).toBe(50);
+
+    const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
+    expect(childEnv.OPENROUTER_API_KEY).toBe("or-poison-not-real"); // forwarded: it IS the gateway credential
+    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(childEnv.HF_TOKEN).toBeUndefined();
+  });
+
+  test("pi: --budget is enforceable mid-run (killed between turns on overspend)", async () => {
+    const { launch } = await import("../src/core/launch");
+    const { getRun, eventsAfter } = await import("../src/core/db");
+
+    const run = launch(
+      baseSpec({
+        harness: "pi",
+        model: "fake/model",
+        goal: "spend too much OVERBUDGET",
+        artifacts: ["out.txt"],
+        budget_usd: 1,
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    expect(done.exit).toBe("killed");
+    const capEvents = eventsAfter(run.id, 0).filter(
+      (e: any) => e.kind === "error" && e.payload?.note === "cap-exceeded",
+    );
+    expect(capEvents.length).toBe(1);
+    expect(String((capEvents[0]!.payload as any).detail)).toContain("budget");
+  });
+
+  test("pi: subscription without a provider-prefixed model is refused (env-dependent defaults)", async () => {
+    const { launch } = await import("../src/core/launch");
+    // Locally: the model-requirement error. CI (no ~/.pi): the no-login error. Both fail closed.
+    expect(() => launch(baseSpec({ harness: "pi", auth: { mode: "subscription" } }) as never)).toThrow(
+      /pi requires --model|no resident pi login/,
+    );
+  });
+
+  test("pi: api_key mode refused with an honest rationale", async () => {
+    const { launch } = await import("../src/core/launch");
+    expect(() => launch(baseSpec({ harness: "pi", auth: { mode: "api_key" } }) as never)).toThrow(
+      /does not support auth mode "api_key".*auth\.json/,
+    );
+  });
+
+  test("resume: linked run in the parent's workdir continuing the native session", async () => {
+    const { launch } = await import("../src/core/launch");
+    const { getRun } = await import("../src/core/db");
+
+    const parentRun = launch(
+      baseSpec({
+        harness: "codex",
+        goal: "first step: produce out.txt",
+        artifacts: ["out.txt"],
+        auth: { mode: "api_key" },
+      }) as never,
+    );
+    const parent = await waitTerminal(() => getRun(parentRun.id));
+    expect(parent.session_ref).toBe("fake-thread-0001");
+
+    const resumed = launch(
+      baseSpec({
+        harness: "codex",
+        goal: "second step: append",
+        artifacts: ["out.txt"],
+        auth: { mode: "api_key" },
+      }) as never,
+      { parent },
+    );
+    expect(resumed.parent_run_id).toBe(parent.id);
+    expect(resumed.root_run_id).toBe(parent.root_run_id);
+    expect(resumed.workdir).toBe(parent.workdir); // SAME worktree, not a new one
+
+    const resumedDone = await waitTerminal(() => getRun(resumed.id));
+    expect(resumedDone.exit).toBe("succeeded");
+    expect(resumedDone.session_ref).toBe(parent.session_ref); // continued, not fresh
+    const content = readFileSync(join(parent.workdir, "out.txt"), "utf8");
+    expect(content).toContain("resumed OK"); // the fake appends only under exec resume
+  });
+
+  test("resume: refused for a parent without a session_ref", async () => {
+    const { launch } = await import("../src/core/launch");
+    const { getRun, updateRun } = await import("../src/core/db");
+    const parentRun = launch(
+      baseSpec({ harness: "codex", goal: "x", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
+    );
+    const parent = await waitTerminal(() => getRun(parentRun.id));
+    updateRun(parent.id, { session_ref: null });
+    expect(() =>
+      launch(baseSpec({ harness: "codex", goal: "y", auth: { mode: "api_key" } }) as never, {
+        parent: getRun(parent.id)!,
+      }),
+    ).toThrow(/no session reference/);
+  });
+
+  test("capability honesty: resume declarations are backed by real resume argv", async () => {
+    const { ADAPTERS } = await import("../src/core/adapters/registry");
+    for (const adapter of ADAPTERS) {
+      if (adapter.capabilities.resume !== "native") continue;
+      const { argv } = adapter.buildCommand({
+        spec: baseSpec({ harness: adapter.name, auth: { mode: "api_key" } }) as never,
+        binPath: "/bin/echo",
+        workdir: join(home, "cap-check-work"),
+        credential: { envVar: "X_KEY", value: "x-not-real-x" },
+        resumeSession: "SESSION-REF-123",
+      });
+      expect(argv.join(" ")).toContain("SESSION-REF-123");
+    }
   });
 
   test("TOML parser keeps '#' inside quoted values", async () => {

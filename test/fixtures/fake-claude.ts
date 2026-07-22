@@ -38,6 +38,11 @@ if (prompt.includes("RAWLINES")) {
 const emit = (obj: unknown) => console.log(JSON.stringify(obj));
 
 emit({ type: "system", subtype: "init", session_id: "fake-session-123", model: "fake-model" });
+// Benign native noise observed on real runs - must not trip parser health:
+emit({ type: "system", subtype: "hook_started", hook_name: "SessionStart" });
+emit({ type: "system", subtype: "thinking_tokens", tokens: 42 });
+emit({ type: "system", subtype: "api_retry", attempt: 1 });
+emit({ type: "assistant", message: { content: [{ type: "thinking", thinking: "..." }] } });
 emit({ type: "assistant", message: { content: [{ type: "text", text: "Working on it." }] } });
 emit({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: "out.txt" } }] } });
 
