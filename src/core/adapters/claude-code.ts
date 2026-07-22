@@ -61,7 +61,7 @@ export const claudeCode: HarnessAdapter = {
       env.CLAUDE_CODE_SUBAGENT_MODEL = spec.model;
     }
 
-    let prompt = spec.goal;
+    let prompt = spec.prompt;
     if (spec.artifacts.length > 0) {
       prompt += `\n\nWrite the deliverables to these exact paths (relative to the working directory): ${spec.artifacts.join(", ")}`;
     }
@@ -74,7 +74,7 @@ export const claudeCode: HarnessAdapter = {
       "--verbose",
       "--dangerously-skip-permissions",
     ];
-    if (ctx.resumeSession) argv.push("--resume", ctx.resumeSession);
+    if (ctx.resumeSessionId) argv.push("--resume", ctx.resumeSessionId);
     if (spec.model && spec.auth.mode !== "gateway") argv.push("--model", spec.model);
     if (spec.auth.mode === "gateway") argv.push("--model", spec.model!);
     argv.push(prompt);
@@ -101,7 +101,7 @@ export const claudeCode: HarnessAdapter = {
       case "system":
         if (obj.subtype === "init") {
           events.push({ kind: "started", payload: { session_id: obj.session_id, model: obj.model } });
-          if (obj.session_id) update = { session_ref: obj.session_id };
+          if (obj.session_id) update = { session_id: obj.session_id };
         } else if (!BENIGN_SYSTEM.test(obj.subtype ?? "")) {
           events.push({ kind: "error", payload: { note: "unknown-native-event", raw: line.slice(0, 2000) } });
         }
@@ -141,7 +141,7 @@ export const claudeCode: HarnessAdapter = {
           tokens_out: obj.usage?.output_tokens,
           result_text: typeof obj.result === "string" ? obj.result : undefined,
         };
-        if (obj.session_id) update.session_ref = obj.session_id;
+        if (obj.session_id) update.session_id = obj.session_id;
         events.push({
           kind: "cost_update",
           payload: { cost_usd: update.cost_usd ?? null, tokens_in: update.tokens_in ?? null, tokens_out: update.tokens_out ?? null },

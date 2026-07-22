@@ -135,14 +135,14 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
 
   if (!harness) fail("--harness is required");
   if (gateway && apiKey) fail("--gateway and --api-key are mutually exclusive");
-  const goal = positional.join(" ").trim();
-  if (!goal) fail("a goal is required");
+  const prompt = positional.join(" ").trim();
+  if (!prompt) fail("a prompt is required");
 
   return {
     spec: {
       harness,
       model,
-      goal,
+      prompt,
       cwd,
       artifacts,
       visual,
@@ -164,11 +164,11 @@ async function readSpecFromStdin(): Promise<RunSpec> {
   // Same fail-closed validation as the flag form - this is the remote-safe
   // surface, where a malformed payload is the most likely failure mode.
   if (typeof parsed?.harness !== "string" || !parsed.harness) fail(`--spec -: "harness" (string) is required`);
-  if (typeof parsed?.goal !== "string" || !parsed.goal.trim()) fail(`--spec -: "goal" (string) is required`);
+  if (typeof parsed?.prompt !== "string" || !parsed.prompt.trim()) fail(`--spec -: "prompt" (string) is required`);
   return {
     harness: parsed.harness,
     model: parsed.model ?? null,
-    goal: parsed.goal,
+    prompt: parsed.prompt,
     cwd: parsed.cwd ?? null,
     artifacts: parsed.artifacts ?? [],
     visual: parsed.visual ?? false,
@@ -181,7 +181,7 @@ async function readSpecFromStdin(): Promise<RunSpec> {
 /**
  * mc harness check: never mock the boundary we own. Runs the REAL installed CLI
  * end to end on a trivial deterministic task and asserts the full path - launch,
- * events, session_ref, exit, verify, cost extraction, and native resume when
+ * events, session_id, exit, verify, cost extraction, and native resume when
  * declared. Costs cents by design; run when writing an adapter or after a CLI
  * update. The runs it creates are ordinary ledger rows (visible in mc ls).
  */
@@ -217,7 +217,7 @@ async function harnessCheck(args: string[]): Promise<void> {
   const spec: RunSpec = {
     harness: name,
     model,
-    goal: `Create a file mc-check.txt containing exactly this one line: ${marker}`,
+    prompt: `Create a file mc-check.txt containing exactly this one line: ${marker}`,
     cwd: null,
     artifacts: ["mc-check.txt"],
     visual: false,
@@ -231,7 +231,7 @@ async function harnessCheck(args: string[]): Promise<void> {
 
   report("exit=succeeded", done.exit === "succeeded", `got ${done.exit}`);
   report("verdict=verified", done.verdict === "verified", `got ${done.verdict}`);
-  report("session_ref captured", done.session_ref != null, done.session_ref ?? "missing");
+  report("session_id captured", done.session_id != null, done.session_id ?? "missing");
   const content = existsSync(join(done.workdir, "mc-check.txt"))
     ? readFileSync(join(done.workdir, "mc-check.txt"), "utf8")
     : "";
@@ -241,11 +241,11 @@ async function harnessCheck(args: string[]): Promise<void> {
     report("cost extracted (declared per_run + metered)", done.cost_usd != null, `$${done.cost_usd}`);
   }
 
-  if (adapter.capabilities.resume === "native" && done.session_ref) {
+  if (adapter.capabilities.resume === "native" && done.session_id) {
     const resumed = launch(
       {
         ...spec,
-        goal: `Append exactly this one line to mc-check.txt: resumed OK`,
+        prompt: `Append exactly this one line to mc-check.txt: resumed OK`,
         artifacts: ["mc-check.txt"],
       },
       { parent: done },
@@ -257,7 +257,7 @@ async function harnessCheck(args: string[]): Promise<void> {
       ? readFileSync(join(done.workdir, "mc-check.txt"), "utf8")
       : "";
     report("resume continued in same workdir", after.includes("resumed OK") && after.includes(marker), after.trim().slice(0, 80));
-    report("resume captured a session_ref", resumedDone.session_ref != null, resumedDone.session_ref ?? "missing");
+    report("resume captured a session_id", resumedDone.session_id != null, resumedDone.session_id ?? "missing");
   }
 
   if (failures.length > 0) {
@@ -287,7 +287,7 @@ COMMANDS
   harness ls    Adapters: capabilities, install status, live auth probes
   harness check <name> [--gateway G] [--model M]
                 Live end-to-end validation against the REAL CLI (costs cents):
-                launch, verify, session_ref, cost/token extraction, native resume
+                launch, verify, session_id, cost/token extraction, native resume
   help          This page (also: -h, --help anywhere)
 
 RUN OPTIONS
@@ -428,7 +428,7 @@ export async function cliMain(argv: string[]): Promise<void> {
 
       case "resume": {
         const parent = requireRun(args[0]);
-        // Inherit harness/model/auth from the parent's archived spec; new goal.
+        // Inherit harness/model/auth from the parent's archived spec; new prompt.
         const parentStored = JSON.parse(readFileSync(parent.spec_path, "utf8"));
         let maxMinutes: number | null = null;
         let budget: number | null = null;
@@ -452,13 +452,13 @@ export async function cliMain(argv: string[]): Promise<void> {
               positional.push(arg);
           }
         }
-        const goal = positional.join(" ").trim();
-        if (!goal) fail("a follow-up prompt is required");
+        const prompt = positional.join(" ").trim();
+        if (!prompt) fail("a follow-up prompt is required");
         const run = launch(
           {
             harness: parent.harness,
             model: parent.model,
-            goal,
+            prompt,
             cwd: null,
             artifacts,
             visual,
@@ -469,7 +469,7 @@ export async function cliMain(argv: string[]): Promise<void> {
           { parent },
         );
         console.log(`${run.id}  ${run.title}`);
-        console.log(`    resumes ${parent.id} (session ${parent.session_ref}) in ${run.workdir}`);
+        console.log(`    resumes ${parent.id} (session ${parent.session_id}) in ${run.workdir}`);
         console.log(`    mc tail ${run.id}   # follow`);
         break;
       }
@@ -490,7 +490,7 @@ export async function cliMain(argv: string[]): Promise<void> {
             let probe: string;
             try {
               const spec: RunSpec = {
-                harness: adapter.name, model: mode === "gateway" ? "probe/probe" : null, goal: "probe",
+                harness: adapter.name, model: mode === "gateway" ? "probe/probe" : null, prompt: "probe",
                 cwd: null, artifacts: [], visual: false, budget_usd: null, max_minutes: null,
                 auth: mode === "gateway" ? { mode, gateway: "openrouter" } : { mode },
               };

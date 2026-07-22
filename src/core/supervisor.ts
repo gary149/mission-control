@@ -44,7 +44,7 @@ export async function supervise(runId: string): Promise<void> {
     gatewayCfg: auth.gatewayCfg,
     credential: auth.credential,
     workdir: run.workdir,
-    resumeSession: typeof stored.resume_session === "string" ? stored.resume_session : undefined,
+    resumeSessionId: typeof stored.resume_session_id === "string" ? stored.resume_session_id : undefined,
   };
   const { argv, env } = adapter.buildCommand(ctx);
 
@@ -102,7 +102,7 @@ export async function supervise(runId: string): Promise<void> {
     }
     if (mapped.update) {
       const u = mapped.update;
-      if (u.session_ref) updates.session_ref = u.session_ref;
+      if (u.session_id) updates.session_id = u.session_id;
       // cost lands on the run ONLY when the basis says the figure is real;
       // gateway-mode claude figures stay in the event stream for debugging.
       const metered = run.cost_basis === "metered_reported";

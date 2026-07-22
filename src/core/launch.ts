@@ -20,8 +20,8 @@ function newRunId(): string {
   throw new Error("could not allocate a run id");
 }
 
-function deriveTitle(goal: string): string {
-  const line = goal.split("\n")[0]!.trim();
+function deriveTitle(prompt: string): string {
+  const line = prompt.split("\n")[0]!.trim();
   return line.length <= 60 ? line : line.slice(0, 57) + "...";
 }
 
@@ -57,7 +57,7 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
         `harness "${adapter.name}" declares resume: "${adapter.capabilities.resume}" - it cannot continue a session (never silently starts fresh)`,
       );
     }
-    if (!parent.session_ref) {
+    if (!parent.session_id) {
       throw new PreflightError(
         `run ${parent.id} has no session reference to resume (its stream never yielded one - see mc show ${parent.id})`,
       );
@@ -77,7 +77,7 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
   }
 
   const id = newRunId();
-  const title = deriveTitle(spec.goal); // before any disk effects: a bad goal must not orphan a workdir
+  const title = deriveTitle(spec.prompt); // before any disk effects: a bad prompt must not orphan a workdir
   // Resume continues in the PARENT's workdir: same worktree, same artifacts,
   // same harness-native session store next to it.
   let workdir: string;
@@ -95,7 +95,7 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
   writeFileSync(
     specPath,
     JSON.stringify(
-      { ...spec, is_git: isGit, bin: detection.path, resume_session: parent?.session_ref ?? undefined },
+      { ...spec, is_git: isGit, bin: detection.path, resume_session_id: parent?.session_id ?? undefined },
       null,
       2,
     ),
@@ -108,11 +108,11 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
     harness: spec.harness,
     model: spec.model,
     host: hostname(),
-    goal: spec.goal,
+    prompt: spec.prompt,
     title,
     spec_path: specPath,
     workdir,
-    session_ref: null,
+    session_id: null,
     exit: "queued",
     verdict: "pending",
     started_at: new Date().toISOString(),

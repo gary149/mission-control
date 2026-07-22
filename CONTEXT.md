@@ -7,6 +7,11 @@ previously untracked glue.
 
 ## Language
 
+**Naming principle** (decided 2026-07-22): stay as close as possible to Claude Code's
+own vocabulary with as little invented abstraction as possible. A field gets an mc-specific
+name only when mc adds real semantics (Verdict, cost_basis, Harness). Hence `prompt` not
+"goal", `session_id` not "session_ref".
+
 **Run**:
 A unit of delegated work that mission-control launched; exactly one harness session.
 Work not launched by mission-control is outside the system by definition, and subagents a
