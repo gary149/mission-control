@@ -54,9 +54,9 @@ export const pi: HarnessAdapter = {
     const argv = [ctx.binPath, "-p", "--mode", "json", "--session-dir", sessionDir];
     if (spec.auth.mode === "gateway") argv.push("--provider", ctx.gatewayCfg!.name);
     if (spec.model) argv.push("--model", spec.model);
-    if (ctx.resumeSession) argv.push("--session", ctx.resumeSession);
+    if (ctx.resumeSessionId) argv.push("--session", ctx.resumeSessionId);
 
-    let prompt = spec.goal;
+    let prompt = spec.prompt;
     if (spec.artifacts.length > 0) {
       prompt += `\n\nWrite the deliverables to these exact paths (relative to the working directory): ${spec.artifacts.join(", ")}`;
     }
@@ -78,7 +78,7 @@ export const pi: HarnessAdapter = {
     switch (obj?.type) {
       case "session":
         events.push({ kind: "started", payload: { session_id: obj.id } });
-        if (obj.id) update = { session_ref: obj.id };
+        if (obj.id) update = { session_id: obj.id };
         break;
       // Streaming/progress noise, deliberately skipped:
       case "agent_start":

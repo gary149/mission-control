@@ -15,13 +15,13 @@ export interface LaunchContext {
   credential?: { envVar: string; value: string };
   workdir: string;
   /** Harness-native session reference to resume (mc resume); adapter maps it to native flags. */
-  resumeSession?: string;
+  resumeSessionId?: string;
 }
 
 export interface MappedLine {
   events: { kind: EventKind; payload: unknown }[];
   update?: {
-    session_ref?: string;
+    session_id?: string;
     /** Absolute totals (harness reports a final figure once, e.g. claude's result event). */
     cost_usd?: number;
     tokens_in?: number;
