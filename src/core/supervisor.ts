@@ -44,6 +44,7 @@ export async function supervise(runId: string): Promise<void> {
     gatewayCfg: auth.gatewayCfg,
     credential: auth.credential,
     workdir: run.workdir,
+    resumeSession: typeof stored.resume_session === "string" ? stored.resume_session : undefined,
   };
   const { argv, env } = adapter.buildCommand(ctx);
 
@@ -83,6 +84,10 @@ export async function supervise(runId: string): Promise<void> {
   // event) must cap the verdict at unverifiable, not pass silently.
   let parseErrors = 0;
   let sawResult = false;
+  // Delta-reporting harnesses (pi, codex) emit per-turn figures; accumulate.
+  let costAccumulated: number | null = null;
+  let tokensInAccumulated: number | null = null;
+  let tokensOutAccumulated: number | null = null;
 
   const updates: Record<string, unknown> = {};
   const stdoutLines = createInterface({ input: child.stdout! });
@@ -96,18 +101,32 @@ export async function supervise(runId: string): Promise<void> {
       insertEvent(runId, event.kind, event.payload);
     }
     if (mapped.update) {
-      const { session_ref, cost_usd, tokens_in, tokens_out } = mapped.update;
-      if (session_ref) updates.session_ref = session_ref;
-      // cost_usd is copied onto the run ONLY when the basis says the figure is
-      // real; gateway-mode figures stay in the event stream for debugging.
-      if (cost_usd != null && run.cost_basis === "metered_reported") updates.cost_usd = cost_usd;
-      if (tokens_in != null) updates.tokens_in = tokens_in;
-      if (tokens_out != null) updates.tokens_out = tokens_out;
+      const u = mapped.update;
+      if (u.session_ref) updates.session_ref = u.session_ref;
+      // cost lands on the run ONLY when the basis says the figure is real;
+      // gateway-mode claude figures stay in the event stream for debugging.
+      const metered = run.cost_basis === "metered_reported";
+      if (u.cost_usd != null && metered) updates.cost_usd = u.cost_usd;
+      if (u.cost_usd_delta != null && metered) {
+        costAccumulated = (costAccumulated ?? 0) + u.cost_usd_delta;
+        updates.cost_usd = costAccumulated;
+      }
+      if (u.tokens_in != null) updates.tokens_in = u.tokens_in;
+      if (u.tokens_out != null) updates.tokens_out = u.tokens_out;
+      if (u.tokens_in_delta != null) {
+        tokensInAccumulated = (tokensInAccumulated ?? 0) + u.tokens_in_delta;
+        updates.tokens_in = tokensInAccumulated;
+      }
+      if (u.tokens_out_delta != null) {
+        tokensOutAccumulated = (tokensOutAccumulated ?? 0) + u.tokens_out_delta;
+        updates.tokens_out = tokensOutAccumulated;
+      }
       if (Object.keys(updates).length > 0) updateRun(runId, updates as never);
-      // Budget is enforceable only when the harness reports cost (cost_basis
-      // gating already refused --budget everywhere else at preflight).
-      if (run.budget_usd != null && cost_usd != null && cost_usd > run.budget_usd) {
-        killedByCap = `budget ($${run.budget_usd}) exceeded at $${cost_usd}`;
+      // Budget enforcement: real for per-turn cost reporters (pi) - the run is
+      // killed between turns the moment the accumulated spend crosses the cap.
+      const currentCost = (updates.cost_usd as number | undefined) ?? null;
+      if (run.budget_usd != null && currentCost != null && currentCost > run.budget_usd) {
+        killedByCap = `budget ($${run.budget_usd}) exceeded at $${currentCost.toFixed(4)}`;
         child.kill("SIGTERM");
       }
     }
