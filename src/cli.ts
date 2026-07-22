@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ADAPTERS, getAdapter } from "./core/adapters/registry";
 import { resolveAuth } from "./core/auth";
 import { loadConfig } from "./core/config";
@@ -176,6 +178,95 @@ async function readSpecFromStdin(): Promise<RunSpec> {
   };
 }
 
+/**
+ * mc harness check: never mock the boundary we own. Runs the REAL installed CLI
+ * end to end on a trivial deterministic task and asserts the full path - launch,
+ * events, session_ref, exit, verify, cost extraction, and native resume when
+ * declared. Costs cents by design; run when writing an adapter or after a CLI
+ * update. The runs it creates are ordinary ledger rows (visible in mc ls).
+ */
+async function harnessCheck(args: string[]): Promise<void> {
+  const name = args[0];
+  if (!name) fail("usage: mc harness check <name> [--gateway NAME] [--model M]");
+  let gateway: string | null = null;
+  let model: string | null = null;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--gateway") gateway = args[++i] ?? fail("--gateway requires a value");
+    else if (args[i] === "--model") model = args[++i] ?? fail("--model requires a value");
+    else fail(`unknown flag ${args[i]}`);
+  }
+  const adapter = getAdapter(name);
+  const failures: string[] = [];
+  const report = (label: string, ok: boolean, detail: string) => {
+    console.log(`  ${ok ? "PASS" : "FAIL"}  ${label}${detail ? ` (${detail})` : ""}`);
+    if (!ok) failures.push(label);
+  };
+
+  const waitTerminal = async (id: string, timeoutMs: number): Promise<Run> => {
+    const start = Date.now();
+    for (;;) {
+      const current = (await reapLostRuns([getRun(id)!]))[0]!;
+      if (!isActive(current)) return current;
+      if (Date.now() - start > timeoutMs) fail(`check run ${id} did not terminate within ${timeoutMs / 60000} minutes`);
+      await Bun.sleep(1000);
+    }
+  };
+
+  console.log(`checking ${name}${gateway ? ` via gateway ${gateway}` : ""} (this runs the real CLI and costs real usage)`);
+  const marker = `mc harness check ${Math.random().toString(36).slice(2, 8)}`;
+  const spec: RunSpec = {
+    harness: name,
+    model,
+    goal: `Create a file mc-check.txt containing exactly this one line: ${marker}`,
+    cwd: null,
+    artifacts: ["mc-check.txt"],
+    visual: false,
+    budget_usd: null,
+    max_minutes: 10,
+    auth: gateway ? { mode: "gateway", gateway } : { mode: "subscription" },
+  };
+  const run = launch(spec);
+  console.log(`  run ${run.id} launched...`);
+  const done = await waitTerminal(run.id, 10 * 60_000);
+
+  report("exit=succeeded", done.exit === "succeeded", `got ${done.exit}`);
+  report("verdict=verified", done.verdict === "verified", `got ${done.verdict}`);
+  report("session_ref captured", done.session_ref != null, done.session_ref ?? "missing");
+  const content = existsSync(join(done.workdir, "mc-check.txt"))
+    ? readFileSync(join(done.workdir, "mc-check.txt"), "utf8")
+    : "";
+  report("artifact content exact", content.trim() === marker, content.trim().slice(0, 60));
+  report("tokens extracted", done.tokens_out != null && done.tokens_out > 0, `out=${done.tokens_out}`);
+  if (adapter.capabilities.cost_reporting === "per_run" && done.cost_basis === "metered_reported") {
+    report("cost extracted (declared per_run + metered)", done.cost_usd != null, `$${done.cost_usd}`);
+  }
+
+  if (adapter.capabilities.resume === "native" && done.session_ref) {
+    const resumed = launch(
+      {
+        ...spec,
+        goal: `Append exactly this one line to mc-check.txt: resumed OK`,
+        artifacts: ["mc-check.txt"],
+      },
+      { parent: done },
+    );
+    console.log(`  resume run ${resumed.id} launched...`);
+    const resumedDone = await waitTerminal(resumed.id, 10 * 60_000);
+    report("resume exit=succeeded", resumedDone.exit === "succeeded", `got ${resumedDone.exit}`);
+    const after = existsSync(join(done.workdir, "mc-check.txt"))
+      ? readFileSync(join(done.workdir, "mc-check.txt"), "utf8")
+      : "";
+    report("resume continued in same workdir", after.includes("resumed OK") && after.includes(marker), after.trim().slice(0, 80));
+    report("resume captured a session_ref", resumedDone.session_ref != null, resumedDone.session_ref ?? "missing");
+  }
+
+  if (failures.length > 0) {
+    console.error(`\n${failures.length} check(s) failed for ${name}`);
+    process.exit(1);
+  }
+  console.log(`\nall checks passed for ${name}`);
+}
+
 function printHelp(): void {
   const build = process.env.MC_BUILD ? ` (${process.env.MC_BUILD})` : "";
   const harnesses = ADAPTERS.map((a) => a.name).join(", ");
@@ -186,13 +277,18 @@ USAGE
   mc <command> [options]
 
 COMMANDS
-  run        Launch a tracked, isolated, verified run on a harness
-  ls         List runs; also reaps lost runs and re-delivers missed notifications
-  show <id>  Full run record, verification evidence, recent events
-  tail <id>  Follow a run's event stream until it terminates
-  kill <id>  Request termination (state lands when the process actually dies)
-  harness ls Adapters: capabilities, install status, live auth probes
-  help       This page (also: -h, --help anywhere)
+  run           Launch a tracked, isolated, verified run on a harness
+  resume <id>   Continue a run's harness session with a follow-up prompt: a new
+                linked run in the SAME workdir (inherits harness/model/auth)
+  ls            List runs; also reaps lost runs and re-delivers missed notifications
+  show <id>     Full run record, verification evidence, recent events
+  tail <id>     Follow a run's event stream until it terminates
+  kill <id>     Request termination (state lands when the process actually dies)
+  harness ls    Adapters: capabilities, install status, live auth probes
+  harness check <name> [--gateway G] [--model M]
+                Live end-to-end validation against the REAL CLI (costs cents):
+                launch, verify, session_ref, cost/token extraction, native resume
+  help          This page (also: -h, --help anywhere)
 
 RUN OPTIONS
   --harness H       Required. Registered: ${harnesses}
@@ -330,8 +426,60 @@ export async function cliMain(argv: string[]): Promise<void> {
         break;
       }
 
+      case "resume": {
+        const parent = requireRun(args[0]);
+        // Inherit harness/model/auth from the parent's archived spec; new goal.
+        const parentStored = JSON.parse(readFileSync(parent.spec_path, "utf8"));
+        let maxMinutes: number | null = null;
+        let budget: number | null = null;
+        let visual = false;
+        const artifacts: string[] = [];
+        const positional: string[] = [];
+        for (let i = 1; i < args.length; i++) {
+          const arg = args[i]!;
+          const next = () => {
+            const value = args[++i];
+            if (value === undefined) fail(`${arg} requires a value`);
+            return value;
+          };
+          switch (arg) {
+            case "--artifact": artifacts.push(next()); break;
+            case "--max-minutes": maxMinutes = Number(next()); break;
+            case "--budget": budget = Number(next()); break;
+            case "--visual": visual = true; break;
+            default:
+              if (arg.startsWith("--")) fail(`unknown flag ${arg} (resume inherits harness/model/auth from the parent)`);
+              positional.push(arg);
+          }
+        }
+        const goal = positional.join(" ").trim();
+        if (!goal) fail("a follow-up prompt is required");
+        const run = launch(
+          {
+            harness: parent.harness,
+            model: parent.model,
+            goal,
+            cwd: null,
+            artifacts,
+            visual,
+            budget_usd: budget,
+            max_minutes: maxMinutes,
+            auth: parentStored.auth ?? { mode: "subscription" },
+          },
+          { parent },
+        );
+        console.log(`${run.id}  ${run.title}`);
+        console.log(`    resumes ${parent.id} (session ${parent.session_ref}) in ${run.workdir}`);
+        console.log(`    mc tail ${run.id}   # follow`);
+        break;
+      }
+
       case "harness": {
-        if (args[0] !== "ls") fail("usage: mc harness ls");
+        if (args[0] === "check") {
+          await harnessCheck(args.slice(1));
+          break;
+        }
+        if (args[0] !== "ls") fail("usage: mc harness ls | mc harness check <name> [--gateway NAME] [--model M]");
         const config = loadConfig();
         for (const adapter of ADAPTERS) {
           const detection = adapter.detect();

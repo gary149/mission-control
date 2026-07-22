@@ -36,7 +36,8 @@ For development, `bun link` exposes the source entrypoint as `mc`, or use
 
 ## Use
 
-v0 ships one harness adapter (claude-code) with all three auth modes.
+Three harness adapters - claude-code, codex, pi - each verified end-to-end against the
+real CLI by `mc harness check` (launch, verify, session capture, native resume).
 
 ```sh
 mc help
@@ -47,6 +48,9 @@ mc run --harness claude-code --artifact out/report.md "write the report"
 # Any model via OpenRouter (key must be resident on this host):
 mc run --harness claude-code --gateway openrouter \
   --model moonshotai/kimi-k3 --max-minutes 30 --artifact hello.txt "..."
+
+mc resume <id> "also add tests"   # continue the session, new linked run, same workdir
+mc harness check codex            # live validation against the real CLI (costs cents)
 
 mc ls            # what ran, both status axes, cost, age
 mc tail <id>     # follow the normalized event stream

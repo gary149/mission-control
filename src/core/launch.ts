@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,9 +31,15 @@ function assertPositive(name: string, value: number | null): void {
   }
 }
 
-export function launch(spec: RunSpec): Run {
+export interface LaunchOptions {
+  /** mc resume: continue the parent's harness session in the parent's workdir. */
+  parent?: Run;
+}
+
+export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
   const adapter = getAdapter(spec.harness);
   const config = loadConfig();
+  const parent = options.parent ?? null;
 
   // Fail-closed preflight: caps, artifacts, auth (incl. budget enforceability), binary.
   assertPositive("--budget", spec.budget_usd);
@@ -43,6 +49,21 @@ export function launch(spec: RunSpec): Run {
       throw new PreflightError(
         `artifact path "${artifact}" is absolute or escapes the run workdir; declare workdir-relative paths only`,
       );
+    }
+  }
+  if (parent) {
+    if (adapter.capabilities.resume !== "native") {
+      throw new PreflightError(
+        `harness "${adapter.name}" declares resume: "${adapter.capabilities.resume}" - it cannot continue a session (never silently starts fresh)`,
+      );
+    }
+    if (!parent.session_ref) {
+      throw new PreflightError(
+        `run ${parent.id} has no session reference to resume (its stream never yielded one - see mc show ${parent.id})`,
+      );
+    }
+    if (parent.harness !== spec.harness) {
+      throw new PreflightError(`cannot resume a ${parent.harness} run with harness ${spec.harness}`);
     }
   }
   const auth = resolveAuth(spec, adapter, config);
@@ -57,15 +78,33 @@ export function launch(spec: RunSpec): Run {
 
   const id = newRunId();
   const title = deriveTitle(spec.goal); // before any disk effects: a bad goal must not orphan a workdir
-  const { workdir, isGit } = createWorkdir(id, spec.cwd);
+  // Resume continues in the PARENT's workdir: same worktree, same artifacts,
+  // same harness-native session store next to it.
+  let workdir: string;
+  let isGit: boolean;
+  if (parent) {
+    const parentStored = JSON.parse(readFileSync(parent.spec_path, "utf8"));
+    workdir = parent.workdir;
+    isGit = Boolean(parentStored.is_git);
+  } else {
+    ({ workdir, isGit } = createWorkdir(id, spec.cwd));
+  }
   const dir = runDir(id);
+  mkdirSync(dir, { recursive: true });
   const specPath = join(dir, "spec.json");
-  writeFileSync(specPath, JSON.stringify({ ...spec, is_git: isGit, bin: detection.path }, null, 2));
+  writeFileSync(
+    specPath,
+    JSON.stringify(
+      { ...spec, is_git: isGit, bin: detection.path, resume_session: parent?.session_ref ?? undefined },
+      null,
+      2,
+    ),
+  );
 
   const run: Run = {
     id,
-    parent_run_id: null,
-    root_run_id: id,
+    parent_run_id: parent?.id ?? null,
+    root_run_id: parent?.root_run_id ?? id,
     harness: spec.harness,
     model: spec.model,
     host: hostname(),

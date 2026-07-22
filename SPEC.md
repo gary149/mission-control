@@ -366,6 +366,8 @@ from what the adapter happens to emit:
 
 - `--budget` is **refused loudly at preflight** wherever the table can't support it —
   never accepted-but-inert (that would be the silent degradation this spec bans).
+- **Implemented:** pi reports per-turn cost deltas, so `--budget` is genuinely enforced
+  mid-run for pi (the supervisor kills between turns on overspend - verified by test).
 - **v0 note (from code review):** claude-code reports cost only in its terminal result
   event, so even in metered mode a dollar cap could never fire mid-run. `--budget` is
   therefore refused for claude-code entirely in v0 (the table's "allowed" waits for an
@@ -527,10 +529,10 @@ Each milestone is shippable and used daily before the next starts.
 
 ## Open questions
 
-- Codex resume: gated until `codex exec resume` (or its current equivalent) passes a
-  scripted smoke test on the box.
-- Pi adapter session_ref: confirm pi's session id surface in RPC mode maps cleanly to a
-  resumable reference.
+- Codex resume: RESOLVED - `codex exec resume <session-id>` verified end-to-end by
+  `mc harness check codex` (codex-cli 0.144.6, session continued, artifact appended).
+- Pi session_ref: RESOLVED - pi sessions live in the run dir via `--session-dir`; the
+  session id resumes with `--session <id>`, verified by `mc harness check pi`.
 - `lost`-run detection cadence: on-demand at `mc ls` in v1; decide whether milestone 5
   needs a `mc reap` cron on the box.
 - macOS Keychain scopes claude-code's subscription login to one OS user identity: two
