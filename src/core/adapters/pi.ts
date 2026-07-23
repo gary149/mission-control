@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { HarnessAdapter, Detection, LaunchContext, MappedLine } from "./types";
+import type { HarnessAdapter, Detection, LaunchContext, MappedLine } from "./types.ts";
 
 /**
  * pi adapter, grounded in pi 0.81.0 `-p --mode json` (probed live):

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * Stub harness for the conformance/e2e suite: emits claude-code stream-json
  * shaped output without any network or API cost.
@@ -12,6 +12,7 @@
  *   DUMPENV:<path> write the full received env as JSON (poison test)
  */
 import { writeFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const args = process.argv.slice(2);
 
@@ -23,7 +24,7 @@ if (args[0] === "--version") {
 const prompt = args[args.length - 1] ?? "";
 const dumpMatch = prompt.match(/DUMPENV:(\S+)/);
 if (dumpMatch) {
-  writeFileSync(dumpMatch[1]!, JSON.stringify(process.env, null, 2));
+  writeFileSync(dumpMatch[1], JSON.stringify(process.env, null, 2));
 }
 
 // RAWLINES: emit an unreadable native stream (format-drift simulation) - the
@@ -35,7 +36,7 @@ if (prompt.includes("RAWLINES")) {
   process.exit(0);
 }
 
-const emit = (obj: unknown) => console.log(JSON.stringify(obj));
+const emit = (obj) => console.log(JSON.stringify(obj));
 
 emit({ type: "system", subtype: "init", session_id: "fake-session-123", model: "fake-model" });
 // Benign native noise observed on real runs - must not trip parser health:
@@ -53,7 +54,7 @@ if (prompt.includes("LEAK")) {
 
 const sleepMatch = prompt.match(/SLEEP:(\d+)/);
 if (sleepMatch) {
-  await Bun.sleep(Number(sleepMatch[1]));
+  await sleep(Number(sleepMatch[1]));
 }
 
 if (prompt.includes("FAIL")) {

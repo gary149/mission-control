@@ -2,9 +2,9 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { GatewayConfig, McConfig } from "./config";
-import type { HarnessAdapter } from "./adapters/types";
-import { PreflightError, type CostBasis, type RunSpec } from "./types";
+import type { GatewayConfig, McConfig } from "./config.ts";
+import type { HarnessAdapter } from "./adapters/types.ts";
+import { PreflightError, type CostBasis, type RunSpec } from "./types.ts";
 
 export interface ResolvedAuth {
   mode: RunSpec["auth"]["mode"];
