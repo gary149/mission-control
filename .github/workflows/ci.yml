@@ -12,6 +12,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm ci # runs prepare -> tsc build, so emit is validated too
+      - run: npm ci
       - run: npm run check
+      - run: npm run build
+      # dist/ is committed and shipped as-is (no install-time build, ADR 0002);
+      # a stale dist would silently distribute old code, so freshness is a gate.
+      - run: git diff --exit-code -- dist
       - run: npm test
