@@ -53,7 +53,7 @@ Hetzner box, plus deep reads of openclaw, omnigent, nanoclaw, pi-mono, agentsvie
 |---|----------|--------|
 | 1 | Identity | Pure control plane; no resident agent |
 | 2 | Process model | Per-run detached supervisors; per-host SQLite ledger; no global daemon |
-| 3 | Stack | TypeScript on Bun; `bun build --compile` single binary (macOS + Linux) |
+| 3 | Stack | TypeScript on Node >= 22.13 (`node:sqlite`, zero deps); `tsc` to `dist/`; distributed as an npm package (revised 2026-07-23, ADR 0002; was: Bun + compiled single binary) |
 | 4 | Adapters | Wrap each CLI's native headless JSON mode; normalize to one closed event union |
 | 5 | Verification | Two-axis status: `exit` x `verdict`; DONE = succeeded AND verified |
 | 6 | Remote | Install per host; engine is SSH-free; driven via plain `ssh box mc ...` with specs over stdin (revised 2026-07-20, was: `--host` SSH sugar in mc) |
@@ -494,7 +494,7 @@ remote-sync pattern is the template if ever needed).
 
 1. **Spine**: schema + claude-code adapter + supervisor. `mc run/ls/show/tail/kill` local.
 2. **Truth**: verifier + two-axis status + `lost` detection + notify hook with Telegram example.
-3. **Reach**: linux build, box install, `--spec -` stdin form, documented ssh invocation
+3. **Reach**: npm install on any host, `--spec -` stdin form, documented ssh invocation
    pattern.
 4. **Peers**: codex adapter, then pi adapter; capability table + `mc harness ls/check`;
    the conformance suite with fixtures for all three adapters; `mc resume` (claude-code

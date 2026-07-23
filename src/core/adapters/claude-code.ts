@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import type { HarnessAdapter, Detection, LaunchContext, MappedLine } from "./types";
+import type { HarnessAdapter, Detection, LaunchContext, MappedLine } from "./types.ts";
 
 function resolveBin(): string | null {
   if (process.env.MC_CLAUDE_BIN) return process.env.MC_CLAUDE_BIN;

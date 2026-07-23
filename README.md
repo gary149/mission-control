@@ -9,34 +9,27 @@ glossary, and [docs/adr/](./docs/adr/) for the decisions.
 
 ## Install
 
-`mc` is a single self-contained binary with no runtime dependency. Every push to main
-rebuilds the rolling [`latest` release](../../releases/latest) (darwin-arm64, linux-x64,
-linux-arm64) via GitHub Actions.
+`mc` is an npm package on Node.js >= 22.13 with zero runtime dependencies
+(SQLite via `node:sqlite`, no native modules). See
+[ADR 0002](./docs/adr/0002-node-runtime-and-npm-distribution.md) for why the
+compiled-binary distribution was retired.
+
+```sh
+npm install -g github:gary149/mission-control
+```
+
+or from a clone:
 
 ```sh
 git clone https://github.com/gary149/mission-control && cd mission-control
-./install.sh --from-release       # download prebuilt (no toolchain needed)
-# or build from source (needs bun):
-./install.sh
-# PREFIX=/usr/local/bin ./install.sh   for a system-wide install
+npm install && npm link       # builds dist/ and puts `mc` on PATH
 ```
 
-No-clone install on any machine (e.g. a Linux server; no auth, no toolchain):
+Remote machines are the same two commands (install Node once per host; no
+toolchain beyond npm, no signing, nothing to download by hand).
 
-```sh
-curl -fsSL --create-dirs -o ~/.local/bin/mc \
-  https://github.com/gary149/mission-control/releases/download/latest/mc-linux-x64
-chmod +x ~/.local/bin/mc
-```
-
-(macOS: use `./install.sh --from-release` instead - downloaded binaries must be
-ad-hoc signed or arm64 kills them at launch; the installer handles it.)
-
-macOS note: downloaded binaries must be ad-hoc signed or arm64 kills them at launch;
-`install.sh` does this automatically (`codesign --remove-signature` + `--force --sign -`).
-
-For development, `bun link` exposes the source entrypoint as `mc`, or use
-`bun src/mc.ts ...` directly.
+For development, `node src/mc.ts ...` runs straight from source (Node >= 22.18
+strips types natively).
 
 ## Use
 
@@ -68,4 +61,4 @@ State lives in `~/.mission-control/` (override with `MC_HOME`): `mc.db` (runs + 
 add `[notify] exec/webhook` to `~/.mission-control/config.toml` - one push per terminal
 transition with both status axes.
 
-Tests run against a stub harness (no API cost): `bun test`.
+Tests run against a stub harness (no API cost): `npm test`.

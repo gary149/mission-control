@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * Stub codex for the conformance suite. Emits the exec --json JSONL shape
  * captured VERBATIM from codex-cli 0.144.6 on 2026-07-22 (see the adapter's
@@ -20,9 +20,9 @@ const resumeId = isResume ? args[2] : null;
 const prompt = args[args.length - 1] ?? "";
 
 const dumpMatch = prompt.match(/DUMPENV:(\S+)/);
-if (dumpMatch) writeFileSync(dumpMatch[1]!, JSON.stringify(process.env, null, 2));
+if (dumpMatch) writeFileSync(dumpMatch[1], JSON.stringify(process.env, null, 2));
 
-const emit = (obj: unknown) => console.log(JSON.stringify(obj));
+const emit = (obj) => console.log(JSON.stringify(obj));
 const threadId = resumeId ?? "fake-thread-0001";
 
 emit({ type: "thread.started", thread_id: threadId });
