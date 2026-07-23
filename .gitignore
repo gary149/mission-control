@@ -1,6 +1,5 @@
 node_modules/
 bun.lock
-dist/
 *.db
 *.db-wal
 *.db-shm

@@ -137,7 +137,7 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
 
   // Detached per-run supervisor: its lifetime equals the run's; mc exits now.
   // The run id travels via MC_SUPERVISE (not argv) so the same invocation works
-  // from compiled dist (mc.js) and from source / tests (mc.ts, node type
+  // from the shipped dist (mc.js) and from source / tests (mc.ts, node type
   // stripping). Resolved as a sibling of THIS module, never from argv[1]: under
   // `node --test` argv[1] is the test file and spawning it would rerun the suite.
   const entry = ["../mc.js", "../mc.ts"]

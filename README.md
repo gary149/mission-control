@@ -10,7 +10,9 @@ glossary, and [docs/adr/](./docs/adr/) for the decisions.
 ## Install
 
 `mc` is an npm package on Node.js >= 22.13 with zero runtime dependencies
-(SQLite via `node:sqlite`, no native modules). See
+(SQLite via `node:sqlite`, no native modules). The compiled `dist/` is
+committed, so installs run no scripts at all - nothing builds, nothing can
+race or fail at install time. See
 [ADR 0002](./docs/adr/0002-node-runtime-and-npm-distribution.md) for why the
 compiled-binary distribution was retired.
 
@@ -22,14 +24,15 @@ or from a clone:
 
 ```sh
 git clone https://github.com/gary149/mission-control && cd mission-control
-npm install && npm link       # builds dist/ and puts `mc` on PATH
+npm link       # puts `mc` on PATH
 ```
 
-Remote machines are the same two commands (install Node once per host; no
+Remote machines are the same commands (install Node once per host; no
 toolchain beyond npm, no signing, nothing to download by hand).
 
-For development, `node src/mc.ts ...` runs straight from source (Node >= 22.18
-strips types natively).
+Development: `node src/mc.ts ...` runs the TypeScript source directly
+(Node >= 22.18 strips types natively); `npm run build` refreshes `dist/`,
+and CI fails any change where the committed `dist/` is stale.
 
 ## Use
 
