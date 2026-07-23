@@ -2,8 +2,8 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { runDir } from "./config";
-import { PreflightError } from "./types";
+import { runDir } from "./config.ts";
+import { PreflightError } from "./types.ts";
 
 /** Paths a run must never be pointed at (agent-state clobbering class of bug). */
 function forbiddenRoots(): string[] {

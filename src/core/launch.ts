@@ -4,13 +4,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAdapter } from "./adapters/registry";
-import { resolveAuth } from "./auth";
-import { loadConfig, runDir } from "./config";
-import { getRun, insertEvent, insertRun, updateRun } from "./db";
-import { PreflightError, type Run, type RunSpec } from "./types";
-import { artifactStaysInside } from "./verify";
-import { createWorkdir } from "./workspace";
+import { getAdapter } from "./adapters/registry.ts";
+import { resolveAuth } from "./auth.ts";
+import { loadConfig, runDir } from "./config.ts";
+import { getRun, insertEvent, insertRun, updateRun } from "./db.ts";
+import { PreflightError, type Run, type RunSpec } from "./types.ts";
+import { artifactStaysInside } from "./verify.ts";
+import { createWorkdir } from "./workspace.ts";
 
 function newRunId(): string {
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -137,15 +137,14 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
 
   // Detached per-run supervisor: its lifetime equals the run's; mc exits now.
   // The run id travels via MC_SUPERVISE (not argv) so the same invocation works
-  // from source, `bun build` bundles, and compiled binaries.
-  const sibling = fileURLToPath(new URL("../mc.ts", import.meta.url));
-  const argv1 = process.argv[1];
-  const entryArgs = existsSync(sibling)
-    ? [sibling] // running from source (incl. tests importing core directly)
-    : argv1 && /\.(m?js|ts)$/.test(argv1) && existsSync(argv1)
-      ? [argv1] // bundled mc.js
-      : []; // compiled binary: execPath IS mc
-  const child = spawn(process.execPath, entryArgs, {
+  // from compiled dist (mc.js) and from source / tests (mc.ts, node type
+  // stripping). Resolved as a sibling of THIS module, never from argv[1]: under
+  // `node --test` argv[1] is the test file and spawning it would rerun the suite.
+  const entry = ["../mc.js", "../mc.ts"]
+    .map((p) => fileURLToPath(new URL(p, import.meta.url)))
+    .find(existsSync);
+  if (!entry) throw new Error("cannot locate the mc entrypoint next to this module");
+  const child = spawn(process.execPath, [entry], {
     detached: true,
     stdio: "ignore",
     env: { ...process.env, MC_SUPERVISE: id },

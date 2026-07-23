@@ -1,33 +1,17 @@
-import { beforeAll, afterAll, describe, expect, test } from "bun:test";
+import { after, before, describe, test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-const FIXTURE = fileURLToPath(new URL("./fixtures/fake-claude.ts", import.meta.url));
-const FIXTURE_CODEX = fileURLToPath(new URL("./fixtures/fake-codex.ts", import.meta.url));
-const FIXTURE_PI = fileURLToPath(new URL("./fixtures/fake-pi.ts", import.meta.url));
+const FIXTURE = fileURLToPath(new URL("./fixtures/fake-claude.mjs", import.meta.url));
+const FIXTURE_CODEX = fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url));
+const FIXTURE_PI = fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url));
 
 let home: string;
-
-beforeAll(() => {
-  home = mkdtempSync(join(tmpdir(), "mc-test-"));
-  process.env.MC_HOME = home;
-  process.env.MC_CLAUDE_BIN = FIXTURE;
-  process.env.MC_CODEX_BIN = FIXTURE_CODEX;
-  process.env.MC_PI_BIN = FIXTURE_PI;
-  process.env.ANTHROPIC_API_KEY = "sk-test-not-real";
-  // Poison: resident on the host, must never reach a child (additive-from-empty env).
-  process.env.OPENROUTER_API_KEY = "or-poison-not-real";
-  process.env.HF_TOKEN = "hf-poison-not-real";
-  for (const fixture of [FIXTURE, FIXTURE_CODEX, FIXTURE_PI]) chmodSync(fixture, 0o755);
-  // Notify hook writes its payload to a file we can assert on.
-  writeFileSync(join(home, "config.toml"), `[notify]\nexec = "cat > ${home}/notified.json"\n`);
-});
-
-afterAll(() => {
-  rmSync(home, { recursive: true, force: true });
-});
 
 async function waitTerminal(getRun: () => any, timeoutMs = 20000): Promise<any> {
   const start = Date.now();
@@ -35,7 +19,7 @@ async function waitTerminal(getRun: () => any, timeoutMs = 20000): Promise<any> 
     const run = getRun();
     if (run && !["queued", "running"].includes(run.exit)) return run;
     if (Date.now() - start > timeoutMs) throw new Error(`run did not terminate: ${JSON.stringify(run)}`);
-    await Bun.sleep(200);
+    await sleep(200);
   }
 }
 
@@ -55,9 +39,28 @@ function baseSpec(overrides: Record<string, unknown>) {
 }
 
 describe("mission-control e2e (stub harness)", () => {
+  before(() => {
+    home = mkdtempSync(join(tmpdir(), "mc-test-"));
+    process.env.MC_HOME = home;
+    process.env.MC_CLAUDE_BIN = FIXTURE;
+    process.env.MC_CODEX_BIN = FIXTURE_CODEX;
+    process.env.MC_PI_BIN = FIXTURE_PI;
+    process.env.ANTHROPIC_API_KEY = "sk-test-not-real";
+    // Poison: resident on the host, must never reach a child (additive-from-empty env).
+    process.env.OPENROUTER_API_KEY = "or-poison-not-real";
+    process.env.HF_TOKEN = "hf-poison-not-real";
+    for (const fixture of [FIXTURE, FIXTURE_CODEX, FIXTURE_PI]) chmodSync(fixture, 0o755);
+    // Notify hook writes its payload to a file we can assert on.
+    writeFileSync(join(home, "config.toml"), `[notify]\nexec = "cat > ${home}/notified.json"\n`);
+  });
+
+  after(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
   test("run -> verified -> notified, with cost and clean child env", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun, eventsAfter } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const envDump = join(home, "child-env.json");
     const run = launch(
@@ -66,112 +69,114 @@ describe("mission-control e2e (stub harness)", () => {
         artifacts: ["out.txt"],
       }) as never,
     );
-    expect(run.cost_basis).toBe("metered_reported");
+    assert.equal(run.cost_basis, "metered_reported");
 
     const done = await waitTerminal(() => getRun(run.id));
-    expect(done.exit).toBe("succeeded");
-    expect(done.verdict).toBe("verified");
-    expect(done.supervisor_pid).toBeGreaterThan(0);
-    expect(done.cost_usd).toBe(0.42);
-    expect(done.tokens_in).toBe(1000);
-    expect(done.tokens_out).toBe(250);
-    expect(done.session_id).toBe("fake-session-123");
-    expect(existsSync(join(done.workdir, "out.txt"))).toBe(true);
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "verified");
+    assert.ok(done.supervisor_pid > 0);
+    assert.equal(done.cost_usd, 0.42);
+    assert.equal(done.tokens_in, 1000);
+    assert.equal(done.tokens_out, 250);
+    assert.equal(done.session_id, "fake-session-123");
+    assert.ok(existsSync(join(done.workdir, "out.txt")));
 
     // Event stream has the normalized shape.
     const kinds = eventsAfter(run.id, 0).map((e: any) => e.kind);
     for (const expected of ["started", "text", "tool_call", "cost_update", "verify_result", "exited"]) {
-      expect(kinds).toContain(expected);
+      assert.ok(kinds.includes(expected), `missing event kind ${expected} in ${kinds}`);
     }
 
     // Notification fired with both axes and no credential plumbing.
     const payload = JSON.parse(readFileSync(join(home, "notified.json"), "utf8"));
-    expect(payload.id).toBe(run.id);
-    expect(payload.exit).toBe("succeeded");
-    expect(payload.verdict).toBe("verified");
-    expect(payload.auth_mode).toBe("api_key");
-    expect(payload.gateway).toBeUndefined();
+    assert.equal(payload.id, run.id);
+    assert.equal(payload.exit, "succeeded");
+    assert.equal(payload.verdict, "verified");
+    assert.equal(payload.auth_mode, "api_key");
+    assert.equal(payload.gateway, undefined);
 
     // Env poisoning: the child got the one forwarded key and none of the residents.
     const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
-    expect(childEnv.ANTHROPIC_API_KEY).toBe("sk-test-not-real");
-    expect(childEnv.OPENROUTER_API_KEY).toBeUndefined();
-    expect(childEnv.HF_TOKEN).toBeUndefined();
-    expect(childEnv.DISABLE_AUTOUPDATER).toBe("1");
+    assert.equal(childEnv.ANTHROPIC_API_KEY, "sk-test-not-real");
+    assert.equal(childEnv.OPENROUTER_API_KEY, undefined);
+    assert.equal(childEnv.HF_TOKEN, undefined);
+    assert.equal(childEnv.DISABLE_AUTOUPDATER, "1");
   });
 
   test("failing run -> failed + failed_verification, secrets scrubbed from logs", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
 
     const run = launch(baseSpec({ prompt: "fail on purpose FAIL LEAK", artifacts: ["out.txt"] }) as never);
     const done = await waitTerminal(() => getRun(run.id));
 
-    expect(done.exit).toBe("failed");
-    expect(done.verdict).toBe("failed_verification");
+    assert.equal(done.exit, "failed");
+    assert.equal(done.verdict, "failed_verification");
 
     // The injected key was echoed to stderr by the CLI; the stored log must be scrubbed.
     const stderrLog = readFileSync(done.stderr_path, "utf8");
-    expect(stderrLog).toContain("***");
-    expect(stderrLog).not.toContain("sk-test-not-real");
+    assert.ok(stderrLog.includes("***"));
+    assert.ok(!stderrLog.includes("sk-test-not-real"));
   });
 
   test("visual run terminates at needs_human_look", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
 
     const run = launch(baseSpec({ prompt: "make something pretty", artifacts: ["out.txt"], visual: true }) as never);
     const done = await waitTerminal(() => getRun(run.id));
-    expect(done.exit).toBe("succeeded");
-    expect(done.verdict).toBe("needs_human_look");
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "needs_human_look");
   });
 
   test("run with no declared checks lands at unverifiable", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
 
     const run = launch(baseSpec({ prompt: "no artifacts declared" }) as never);
     const done = await waitTerminal(() => getRun(run.id));
-    expect(done.exit).toBe("succeeded");
-    expect(done.verdict).toBe("unverifiable");
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "unverifiable");
   });
 
   test("preflight refuses --budget with adapter-correct advice in every mode", async () => {
-    const { launch } = await import("../src/core/launch");
+    const { launch } = await import("../src/core/launch.ts");
 
     // The claude-code-specific refusal fires first so the user is pointed at
     // --max-minutes directly, never bounced to --api-key (which also refuses).
-    expect(() =>
-      launch(
-        baseSpec({
-          model: "moonshotai/kimi-k3",
-          budget_usd: 5,
-          auth: { mode: "gateway", gateway: "openrouter" },
-        }) as never,
-      ),
-    ).toThrow(/cannot be enforced.*--max-minutes/);
+    assert.throws(
+      () =>
+        launch(
+          baseSpec({
+            model: "moonshotai/kimi-k3",
+            budget_usd: 5,
+            auth: { mode: "gateway", gateway: "openrouter" },
+          }) as never,
+        ),
+      /cannot be enforced[\s\S]*--max-minutes/,
+    );
   });
 
   test("help covers every command and flag, and -h never launches a run", async () => {
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
-    const help = Bun.spawnSync(["bun", entry, "help"], { env: { ...process.env } }).stdout.toString();
+    const help = spawnSync(process.execPath, [entry, "help"], { encoding: "utf8", env: { ...process.env } }).stdout;
     for (const expected of [
       "run", "ls", "show", "tail", "kill", "harness ls",
       "--harness", "--model", "--cwd", "--artifact", "--visual",
       "--max-minutes", "--budget", "--gateway", "--api-key", "--spec",
       "subscription", "MC_HOME", "config.toml",
     ]) {
-      expect(help).toContain(expected);
+      assert.ok(help.includes(expected), `help is missing "${expected}"`);
     }
     // `mc run -h` must print help, not launch a run with prompt "-h".
-    const runH = Bun.spawnSync(["bun", entry, "run", "-h"], { env: { ...process.env } });
-    expect(runH.stdout.toString()).toContain("USAGE");
-    expect(runH.exitCode).toBe(0);
+    const runH = spawnSync(process.execPath, [entry, "run", "-h"], { encoding: "utf8", env: { ...process.env } });
+    assert.ok(runH.stdout.includes("USAGE"));
+    assert.equal(runH.status, 0);
   });
 
   test("codex: verified run, tokens without cost, scratch CODEX_HOME, clean env", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
     process.env.OPENAI_API_KEY = "sk-codex-test-not-real";
 
     const envDump = join(home, "codex-env.json");
@@ -183,32 +188,33 @@ describe("mission-control e2e (stub harness)", () => {
         auth: { mode: "api_key" },
       }) as never,
     );
-    expect(run.cost_basis).toBe("unavailable");
+    assert.equal(run.cost_basis, "unavailable");
     const done = await waitTerminal(() => getRun(run.id));
-    expect(done.exit).toBe("succeeded");
-    expect(done.verdict).toBe("verified");
-    expect(done.session_id).toBe("fake-thread-0001");
-    expect(done.tokens_in).toBe(500);
-    expect(done.tokens_out).toBe(80);
-    expect(done.cost_usd).toBeNull(); // codex never reports dollars, any mode
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "verified");
+    assert.equal(done.session_id, "fake-thread-0001");
+    assert.equal(done.tokens_in, 500);
+    assert.equal(done.tokens_out, 80);
+    assert.equal(done.cost_usd, null); // codex never reports dollars, any mode
 
     const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
-    expect(childEnv.OPENAI_API_KEY).toBe("sk-codex-test-not-real");
-    expect(childEnv.CODEX_HOME).toContain("/codex-home"); // scratch, never ~/.codex
-    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(childEnv.OPENROUTER_API_KEY).toBeUndefined();
+    assert.equal(childEnv.OPENAI_API_KEY, "sk-codex-test-not-real");
+    assert.ok(childEnv.CODEX_HOME.includes("/codex-home")); // scratch, never ~/.codex
+    assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+    assert.equal(childEnv.OPENROUTER_API_KEY, undefined);
   });
 
   test("codex: --budget refused (no cost signal in any mode)", async () => {
-    const { launch } = await import("../src/core/launch");
-    expect(() =>
-      launch(baseSpec({ harness: "codex", budget_usd: 5, auth: { mode: "api_key" } }) as never),
-    ).toThrow(/--budget has no meaning/);
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(
+      () => launch(baseSpec({ harness: "codex", budget_usd: 5, auth: { mode: "api_key" } }) as never),
+      /--budget has no meaning/,
+    );
   });
 
   test("pi: verified run with ACCUMULATED per-turn cost and tokens (gateway mode)", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
 
     const envDump = join(home, "pi-env.json");
     const run = launch(
@@ -220,25 +226,25 @@ describe("mission-control e2e (stub harness)", () => {
         auth: { mode: "gateway", gateway: "openrouter" },
       }) as never,
     );
-    expect(run.cost_basis).toBe("metered_reported");
+    assert.equal(run.cost_basis, "metered_reported");
     const done = await waitTerminal(() => getRun(run.id));
-    expect(done.exit).toBe("succeeded");
-    expect(done.verdict).toBe("verified");
-    expect(done.session_id).toBe("019f0000-fake-7000-a000-000000000001");
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "verified");
+    assert.equal(done.session_id, "019f0000-fake-7000-a000-000000000001");
     // Two turns at 0.001 each and (2000+1000)/(20+30) tokens - deltas must SUM.
-    expect(done.cost_usd).toBeCloseTo(0.002, 5);
-    expect(done.tokens_in).toBe(3000);
-    expect(done.tokens_out).toBe(50);
+    assert.ok(Math.abs(done.cost_usd - 0.002) < 1e-5, `cost_usd ${done.cost_usd} != ~0.002`);
+    assert.equal(done.tokens_in, 3000);
+    assert.equal(done.tokens_out, 50);
 
     const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
-    expect(childEnv.OPENROUTER_API_KEY).toBe("or-poison-not-real"); // forwarded: it IS the gateway credential
-    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
-    expect(childEnv.HF_TOKEN).toBeUndefined();
+    assert.equal(childEnv.OPENROUTER_API_KEY, "or-poison-not-real"); // forwarded: it IS the gateway credential
+    assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+    assert.equal(childEnv.HF_TOKEN, undefined);
   });
 
   test("pi: --budget is enforceable mid-run (killed between turns on overspend)", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun, eventsAfter } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const run = launch(
       baseSpec({
@@ -251,32 +257,34 @@ describe("mission-control e2e (stub harness)", () => {
       }) as never,
     );
     const done = await waitTerminal(() => getRun(run.id));
-    expect(done.exit).toBe("killed");
+    assert.equal(done.exit, "killed");
     const capEvents = eventsAfter(run.id, 0).filter(
-      (e: any) => e.kind === "error" && e.payload?.note === "cap-exceeded",
+      (e: any) => e.kind === "error" && (e.payload as any)?.note === "cap-exceeded",
     );
-    expect(capEvents.length).toBe(1);
-    expect(String((capEvents[0]!.payload as any).detail)).toContain("budget");
+    assert.equal(capEvents.length, 1);
+    assert.ok(String((capEvents[0]!.payload as any).detail).includes("budget"));
   });
 
   test("pi: subscription without a provider-prefixed model is refused (env-dependent defaults)", async () => {
-    const { launch } = await import("../src/core/launch");
+    const { launch } = await import("../src/core/launch.ts");
     // Locally: the model-requirement error. CI (no ~/.pi): the no-login error. Both fail closed.
-    expect(() => launch(baseSpec({ harness: "pi", auth: { mode: "subscription" } }) as never)).toThrow(
+    assert.throws(
+      () => launch(baseSpec({ harness: "pi", auth: { mode: "subscription" } }) as never),
       /pi requires --model|no resident pi login/,
     );
   });
 
   test("pi: api_key mode refused with an honest rationale", async () => {
-    const { launch } = await import("../src/core/launch");
-    expect(() => launch(baseSpec({ harness: "pi", auth: { mode: "api_key" } }) as never)).toThrow(
-      /does not support auth mode "api_key".*auth\.json/,
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(
+      () => launch(baseSpec({ harness: "pi", auth: { mode: "api_key" } }) as never),
+      /does not support auth mode "api_key"[\s\S]*auth\.json/,
     );
   });
 
   test("resume: linked run in the parent's workdir continuing the native session", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
 
     const parentRun = launch(
       baseSpec({
@@ -287,7 +295,7 @@ describe("mission-control e2e (stub harness)", () => {
       }) as never,
     );
     const parent = await waitTerminal(() => getRun(parentRun.id));
-    expect(parent.session_id).toBe("fake-thread-0001");
+    assert.equal(parent.session_id, "fake-thread-0001");
 
     const resumed = launch(
       baseSpec({
@@ -298,34 +306,36 @@ describe("mission-control e2e (stub harness)", () => {
       }) as never,
       { parent },
     );
-    expect(resumed.parent_run_id).toBe(parent.id);
-    expect(resumed.root_run_id).toBe(parent.root_run_id);
-    expect(resumed.workdir).toBe(parent.workdir); // SAME worktree, not a new one
+    assert.equal(resumed.parent_run_id, parent.id);
+    assert.equal(resumed.root_run_id, parent.root_run_id);
+    assert.equal(resumed.workdir, parent.workdir); // SAME worktree, not a new one
 
     const resumedDone = await waitTerminal(() => getRun(resumed.id));
-    expect(resumedDone.exit).toBe("succeeded");
-    expect(resumedDone.session_id).toBe(parent.session_id); // continued, not fresh
+    assert.equal(resumedDone.exit, "succeeded");
+    assert.equal(resumedDone.session_id, parent.session_id); // continued, not fresh
     const content = readFileSync(join(parent.workdir, "out.txt"), "utf8");
-    expect(content).toContain("resumed OK"); // the fake appends only under exec resume
+    assert.ok(content.includes("resumed OK")); // the fake appends only under exec resume
   });
 
   test("resume: refused for a parent without a session_id", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun, updateRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, updateRun } = await import("../src/core/db.ts");
     const parentRun = launch(
       baseSpec({ harness: "codex", prompt: "x", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
     );
     const parent = await waitTerminal(() => getRun(parentRun.id));
     updateRun(parent.id, { session_id: null });
-    expect(() =>
-      launch(baseSpec({ harness: "codex", prompt: "y", auth: { mode: "api_key" } }) as never, {
-        parent: getRun(parent.id)!,
-      }),
-    ).toThrow(/no session reference/);
+    assert.throws(
+      () =>
+        launch(baseSpec({ harness: "codex", prompt: "y", auth: { mode: "api_key" } }) as never, {
+          parent: getRun(parent.id)!,
+        }),
+      /no session reference/,
+    );
   });
 
   test("capability honesty: resume declarations are backed by real resume argv", async () => {
-    const { ADAPTERS } = await import("../src/core/adapters/registry");
+    const { ADAPTERS } = await import("../src/core/adapters/registry.ts");
     for (const adapter of ADAPTERS) {
       if (adapter.capabilities.resume !== "native") continue;
       const { argv } = adapter.buildCommand({
@@ -335,38 +345,39 @@ describe("mission-control e2e (stub harness)", () => {
         credential: { envVar: "X_KEY", value: "x-not-real-x" },
         resumeSessionId: "SESSION-REF-123",
       });
-      expect(argv.join(" ")).toContain("SESSION-REF-123");
+      assert.ok(argv.join(" ").includes("SESSION-REF-123"), `${adapter.name} resume argv lacks the session ref`);
     }
   });
 
   test("TOML parser keeps '#' inside quoted values", async () => {
-    const { loadConfig } = await import("../src/core/config");
-    const { writeFileSync, readFileSync } = await import("node:fs");
+    const { loadConfig } = await import("../src/core/config.ts");
     const configPath = join(home, "config.toml");
     const original = readFileSync(configPath, "utf8");
     try {
       writeFileSync(configPath, `[notify]\nwebhook = "https://example.com/hook?tag=a # not a comment"\n`);
-      expect(loadConfig().notify.webhook).toBe("https://example.com/hook?tag=a # not a comment");
+      assert.equal(loadConfig().notify.webhook, "https://example.com/hook?tag=a # not a comment");
     } finally {
       writeFileSync(configPath, original);
     }
   });
 
   test("preflight refuses unknown gateway and non-prefixed model", async () => {
-    const { launch } = await import("../src/core/launch");
+    const { launch } = await import("../src/core/launch.ts");
 
-    expect(() =>
-      launch(baseSpec({ model: "a/b", auth: { mode: "gateway", gateway: "nope" } }) as never),
-    ).toThrow(/unknown gateway/);
+    assert.throws(
+      () => launch(baseSpec({ model: "a/b", auth: { mode: "gateway", gateway: "nope" } }) as never),
+      /unknown gateway/,
+    );
 
-    expect(() =>
-      launch(baseSpec({ model: "kimi-k3", auth: { mode: "gateway", gateway: "openrouter" } }) as never),
-    ).toThrow(/provider-prefixed/);
+    assert.throws(
+      () => launch(baseSpec({ model: "kimi-k3", auth: { mode: "gateway", gateway: "openrouter" } }) as never),
+      /provider-prefixed/,
+    );
   });
 
   test("gateway run wires the shim env, never leaks ANTHROPIC_API_KEY, never trusts the cost figure", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
 
     const envDump = join(home, "gw-env.json");
     const run = launch(
@@ -379,59 +390,59 @@ describe("mission-control e2e (stub harness)", () => {
     );
     const done = await waitTerminal(() => getRun(run.id));
 
-    expect(done.cost_basis).toBe("unavailable");
-    expect(done.cost_usd).toBeNull(); // the CLI's figure is unreliable under gateway; events keep it
-    expect(done.tokens_in).toBe(1000); // tokens are the honest signal
+    assert.equal(done.cost_basis, "unavailable");
+    assert.equal(done.cost_usd, null); // the CLI's figure is unreliable under gateway; events keep it
+    assert.equal(done.tokens_in, 1000); // tokens are the honest signal
 
     const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
-    expect(childEnv.ANTHROPIC_BASE_URL).toBe("https://openrouter.ai/api");
-    expect(childEnv.ANTHROPIC_AUTH_TOKEN).toBe("or-poison-not-real");
-    expect(childEnv.ANTHROPIC_MODEL).toBe("moonshotai/kimi-k3");
-    expect(childEnv.CLAUDE_CODE_SUBAGENT_MODEL).toBe("moonshotai/kimi-k3");
-    expect(childEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    assert.equal(childEnv.ANTHROPIC_BASE_URL, "https://openrouter.ai/api");
+    assert.equal(childEnv.ANTHROPIC_AUTH_TOKEN, "or-poison-not-real");
+    assert.equal(childEnv.ANTHROPIC_MODEL, "moonshotai/kimi-k3");
+    assert.equal(childEnv.CLAUDE_CODE_SUBAGENT_MODEL, "moonshotai/kimi-k3");
+    assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
   });
 
   test("workspace containment refuses agent-state directories", async () => {
-    const { launch } = await import("../src/core/launch");
-    expect(() => launch(baseSpec({ cwd: join(process.env.HOME!, ".claude") }) as never)).toThrow(/agent-state/);
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(() => launch(baseSpec({ cwd: join(process.env.HOME!, ".claude") }) as never), /agent-state/);
   });
 
   test("preflight refuses --budget on claude-code even when metered (terminal-only cost)", async () => {
-    const { launch } = await import("../src/core/launch");
-    expect(() => launch(baseSpec({ budget_usd: 5 }) as never)).toThrow(/cannot be enforced/);
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(() => launch(baseSpec({ budget_usd: 5 }) as never), /cannot be enforced/);
   });
 
   test("preflight refuses artifact paths that escape the workdir", async () => {
-    const { launch } = await import("../src/core/launch");
-    expect(() => launch(baseSpec({ artifacts: ["../spec.json"] }) as never)).toThrow(/escapes the run workdir/);
-    expect(() => launch(baseSpec({ artifacts: ["/etc/passwd"] }) as never)).toThrow(/escapes the run workdir/);
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(() => launch(baseSpec({ artifacts: ["../spec.json"] }) as never), /escapes the run workdir/);
+    assert.throws(() => launch(baseSpec({ artifacts: ["/etc/passwd"] }) as never), /escapes the run workdir/);
   });
 
   test("preflight refuses invalid cap values", async () => {
-    const { launch } = await import("../src/core/launch");
-    expect(() => launch(baseSpec({ max_minutes: -5 }) as never)).toThrow(/finite positive/);
-    expect(() => launch(baseSpec({ max_minutes: Number.NaN }) as never)).toThrow(/finite positive/);
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(() => launch(baseSpec({ max_minutes: -5 }) as never), /finite positive/);
+    assert.throws(() => launch(baseSpec({ max_minutes: Number.NaN }) as never), /finite positive/);
   });
 
   test("preflight refuses a non-git --cwd instead of silently hiding inputs", async () => {
-    const { launch } = await import("../src/core/launch");
+    const { launch } = await import("../src/core/launch.ts");
     const plainDir = mkdtempSync(join(tmpdir(), "mc-nongit-"));
     try {
-      expect(() => launch(baseSpec({ cwd: plainDir }) as never)).toThrow(/not a git repository/);
+      assert.throws(() => launch(baseSpec({ cwd: plainDir }) as never), /not a git repository/);
     } finally {
       rmSync(plainDir, { recursive: true, force: true });
     }
   });
 
   test("unreadable native stream caps the verdict at unverifiable (parser health)", async () => {
-    const { launch } = await import("../src/core/launch");
-    const { getRun } = await import("../src/core/db");
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
 
     const run = launch(baseSpec({ prompt: "drift simulation RAWLINES", artifacts: ["out.txt"] }) as never);
     const done = await waitTerminal(() => getRun(run.id));
     // Artifact exists and exit is 0, but mc was blind - never verified.
-    expect(done.exit).toBe("succeeded");
-    expect(done.verdict).toBe("unverifiable");
-    expect(done.verify_evidence).toContain("parser_health");
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "unverifiable");
+    assert.ok(done.verify_evidence.includes("parser_health"));
   });
 });

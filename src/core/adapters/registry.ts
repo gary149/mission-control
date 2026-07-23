@@ -1,8 +1,8 @@
-import { PreflightError } from "../types";
-import type { HarnessAdapter } from "./types";
-import { claudeCode } from "./claude-code";
-import { codex } from "./codex";
-import { pi } from "./pi";
+import { PreflightError } from "../types.ts";
+import type { HarnessAdapter } from "./types.ts";
+import { claudeCode } from "./claude-code.ts";
+import { codex } from "./codex.ts";
+import { pi } from "./pi.ts";
 
 /** Static compile-time registry; no dynamic plugin loading (SPEC decision). */
 export const ADAPTERS: HarnessAdapter[] = [claudeCode, codex, pi];
