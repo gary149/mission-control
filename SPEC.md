@@ -53,7 +53,7 @@ Hetzner box, plus deep reads of openclaw, omnigent, nanoclaw, pi-mono, agentsvie
 |---|----------|--------|
 | 1 | Identity | Pure control plane; no resident agent |
 | 2 | Process model | Per-run detached supervisors; per-host SQLite ledger; no global daemon |
-| 3 | Stack | TypeScript on Node >= 22.13 (`node:sqlite`, zero deps); `tsc` to `dist/`; distributed as an npm package (revised 2026-07-23, ADR 0002; was: Bun + compiled single binary) |
+| 3 | Stack | TypeScript on Node >= 22.13; `node:sqlite`, zero runtime deps; committed tsc-emitted `dist/` shipped as an npm package with no install-time scripts (revised 2026-07-23, ADR 0002; was: Bun + compiled single binary) |
 | 4 | Adapters | Wrap each CLI's native headless JSON mode; normalize to one closed event union |
 | 5 | Verification | Two-axis status: `exit` x `verdict`; DONE = succeeded AND verified |
 | 6 | Remote | Install per host; engine is SSH-free; driven via plain `ssh box mc ...` with specs over stdin (revised 2026-07-20, was: `--host` SSH sugar in mc) |

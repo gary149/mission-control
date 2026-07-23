@@ -5,6 +5,7 @@
     "moduleResolution": "NodeNext",
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
+    "erasableSyntaxOnly": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
