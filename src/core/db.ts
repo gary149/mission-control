@@ -1,14 +1,14 @@
-import { Database } from "bun:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
-import { ensureHome, mcHome } from "./config";
-import type { EventKind, Run, RunEvent } from "./types";
+import { ensureHome, mcHome } from "./config.ts";
+import type { EventKind, Run, RunEvent } from "./types.ts";
 
-let db: Database | null = null;
+let db: DatabaseSync | null = null;
 
-export function openDb(): Database {
+export function openDb(): DatabaseSync {
   if (db) return db;
   ensureHome();
-  db = new Database(join(mcHome(), "mc.db"), { create: true });
+  db = new DatabaseSync(join(mcHome(), "mc.db"));
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(`
@@ -57,11 +57,8 @@ export function openDb(): Database {
 }
 
 /** Rename-only migrations for pre-claude-shape databases (goal/session_ref era). */
-function migrate(d: Database): void {
-  const columns = d
-    .query<{ name: string }, []>("PRAGMA table_info(runs)")
-    .all()
-    .map((c) => c.name);
+function migrate(d: DatabaseSync): void {
+  const columns = (d.prepare("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
   if (columns.includes("goal")) d.exec("ALTER TABLE runs RENAME COLUMN goal TO prompt");
   if (columns.includes("session_ref")) d.exec("ALTER TABLE runs RENAME COLUMN session_ref TO session_id");
 }
@@ -99,7 +96,7 @@ export function insertRun(run: Run): void {
   });
   const columns = RUN_COLUMNS.join(", ");
   const placeholders = RUN_COLUMNS.map((c) => `$${c}`).join(", ");
-  openDb().query(`INSERT INTO runs (${columns}) VALUES (${placeholders})`).run(params as never);
+  openDb().prepare(`INSERT INTO runs (${columns}) VALUES (${placeholders})`).run(params as never);
 }
 
 export function updateRun(id: string, fields: Partial<Run>): void {
@@ -110,12 +107,12 @@ export function updateRun(id: string, fields: Partial<Run>): void {
   if (keys.length === 0) return;
   const sets = keys.map((k) => `${k} = $${k}`).join(", ");
   openDb()
-    .query(`UPDATE runs SET ${sets} WHERE id = $__id`)
+    .prepare(`UPDATE runs SET ${sets} WHERE id = $__id`)
     .run(dollarKeys({ ...patch, __id: id }) as never);
 }
 
 export function getRun(id: string): Run | null {
-  const row = openDb().query<RunRow, [string]>("SELECT * FROM runs WHERE id = ?").get(id);
+  const row = openDb().prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow | undefined;
   return row ? rowToRun(row) : null;
 }
 
@@ -124,16 +121,13 @@ export function findRun(idOrPrefix: string): Run | null {
   const exact = getRun(idOrPrefix);
   if (exact) return exact;
   const rows = openDb()
-    .query<RunRow, [string]>("SELECT * FROM runs WHERE id LIKE ? || '%' ORDER BY started_at DESC")
-    .all(idOrPrefix);
+    .prepare("SELECT * FROM runs WHERE id LIKE ? || '%' ORDER BY started_at DESC")
+    .all(idOrPrefix) as RunRow[];
   return rows.length === 1 ? rowToRun(rows[0]!) : null;
 }
 
 export function listRuns(): Run[] {
-  return openDb()
-    .query<RunRow, []>("SELECT * FROM runs ORDER BY started_at DESC")
-    .all()
-    .map(rowToRun);
+  return (openDb().prepare("SELECT * FROM runs ORDER BY started_at DESC").all() as RunRow[]).map(rowToRun);
 }
 
 /**
@@ -143,15 +137,15 @@ export function listRuns(): Run[] {
  */
 export function markLost(id: string): boolean {
   const result = openDb()
-    .query("UPDATE runs SET exit = 'lost', ended_at = ? WHERE id = ? AND exit IN ('running', 'queued')")
+    .prepare("UPDATE runs SET exit = 'lost', ended_at = ? WHERE id = ? AND exit IN ('running', 'queued')")
     .run(new Date().toISOString(), id);
-  return result.changes > 0;
+  return Number(result.changes) > 0;
 }
 
 export function insertEvent(runId: string, kind: EventKind, payload: unknown): void {
   const insert = () =>
     openDb()
-      .query(
+      .prepare(
         `INSERT INTO events (run_id, seq, ts, kind, payload)
          VALUES (?, 1 + COALESCE((SELECT MAX(seq) FROM events WHERE run_id = ?), 0), ?, ?, ?)`,
       )
@@ -164,10 +158,8 @@ export function insertEvent(runId: string, kind: EventKind, payload: unknown): v
 }
 
 export function eventsAfter(runId: string, afterSeq: number): RunEvent[] {
-  return openDb()
-    .query<{ run_id: string; seq: number; ts: string; kind: EventKind; payload: string }, [string, number]>(
-      "SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq",
-    )
-    .all(runId, afterSeq)
-    .map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
+  const rows = openDb()
+    .prepare("SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq")
+    .all(runId, afterSeq) as { run_id: string; seq: number; ts: string; kind: EventKind; payload: string }[];
+  return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
 }

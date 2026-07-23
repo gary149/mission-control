@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import type { McConfig } from "./config";
-import { updateRun } from "./db";
-import type { Run } from "./types";
+import type { McConfig } from "./config.ts";
+import { updateRun } from "./db.ts";
+import type { Run } from "./types.ts";
 
 /**
  * One push per terminal transition. Payload carries both status axes but no

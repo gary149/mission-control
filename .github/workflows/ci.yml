@@ -9,7 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bunx tsc --noEmit
-      - run: bun test
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci # runs prepare -> tsc build, so emit is validated too
+      - run: npm run check
+      - run: npm test

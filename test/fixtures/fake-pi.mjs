@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * Stub pi for the conformance suite. Emits the -p --mode json JSONL shape
  * captured VERBATIM from pi 0.81.0 on 2026-07-22 (two turns, so the per-turn
@@ -20,13 +20,13 @@ const resumeId = sessionFlag >= 0 ? args[sessionFlag + 1] : null;
 const prompt = args[args.length - 1] ?? "";
 
 const dumpMatch = prompt.match(/DUMPENV:(\S+)/);
-if (dumpMatch) writeFileSync(dumpMatch[1]!, JSON.stringify(process.env, null, 2));
+if (dumpMatch) writeFileSync(dumpMatch[1], JSON.stringify(process.env, null, 2));
 
-const emit = (obj: unknown) => console.log(JSON.stringify(obj));
+const emit = (obj) => console.log(JSON.stringify(obj));
 const sessionId = resumeId ?? "019f0000-fake-7000-a000-000000000001";
 const perTurnCost = prompt.includes("OVERBUDGET") ? 3.5 : 0.001;
 
-const usage = (input: number, output: number) => ({
+const usage = (input, output) => ({
   input,
   output,
   cacheRead: 0,

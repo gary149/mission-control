@@ -1,12 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
-import { ADAPTERS, getAdapter } from "./core/adapters/registry";
-import { resolveAuth } from "./core/auth";
-import { loadConfig } from "./core/config";
-import { eventsAfter, findRun, listRuns, markLost, getRun, insertEvent } from "./core/db";
-import { launch } from "./core/launch";
-import { notifyTerminal } from "./core/notify";
-import { PreflightError, type Run, type RunSpec } from "./core/types";
+import { text } from "node:stream/consumers";
+import { setTimeout as sleep } from "node:timers/promises";
+import { ADAPTERS, getAdapter } from "./core/adapters/registry.ts";
+import { resolveAuth } from "./core/auth.ts";
+import { loadConfig } from "./core/config.ts";
+import { eventsAfter, findRun, listRuns, markLost, getRun, insertEvent } from "./core/db.ts";
+import { launch } from "./core/launch.ts";
+import { notifyTerminal } from "./core/notify.ts";
+import { PreflightError, type Run, type RunSpec } from "./core/types.ts";
 
 function fail(message: string): never {
   console.error(`mc: ${message}`);
@@ -154,10 +157,10 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
 }
 
 async function readSpecFromStdin(): Promise<RunSpec> {
-  const text = await new Response(Bun.stdin.stream()).text();
+  const raw = await text(process.stdin);
   let parsed: any;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(raw);
   } catch {
     fail(`--spec -: stdin is not valid JSON`);
   }
@@ -208,7 +211,7 @@ async function harnessCheck(args: string[]): Promise<void> {
       const current = (await reapLostRuns([getRun(id)!]))[0]!;
       if (!isActive(current)) return current;
       if (Date.now() - start > timeoutMs) fail(`check run ${id} did not terminate within ${timeoutMs / 60000} minutes`);
-      await Bun.sleep(1000);
+      await sleep(1000);
     }
   };
 
@@ -268,10 +271,10 @@ async function harnessCheck(args: string[]): Promise<void> {
 }
 
 function printHelp(): void {
-  const build = process.env.MC_BUILD ? ` (${process.env.MC_BUILD})` : "";
+  const version = createRequire(import.meta.url)("../package.json").version as string;
   const harnesses = ADAPTERS.map((a) => a.name).join(", ");
   const gateways = Object.keys(loadConfig().gateways).join(", ");
-  console.log(`mission-control v0${build} - control plane for delegated agent runs
+  console.log(`mission-control v${version} - control plane for delegated agent runs
 
 USAGE
   mc <command> [options]
@@ -404,7 +407,7 @@ export async function cliMain(argv: string[]): Promise<void> {
             console.log(`-- terminal: exit=${current.exit} verdict=${current.verdict} --`);
             break;
           }
-          await Bun.sleep(500);
+          await sleep(500);
         }
         break;
       }

@@ -1,5 +1,5 @@
-import type { GatewayConfig } from "../config";
-import type { Capabilities, EventKind, RunSpec } from "../types";
+import type { GatewayConfig } from "../config.ts";
+import type { Capabilities, EventKind, RunSpec } from "../types.ts";
 
 export interface Detection {
   installed: boolean;

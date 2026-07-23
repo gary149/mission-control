@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
-import type { Run, RunSpec, Verdict } from "./types";
+import type { Run, RunSpec, Verdict } from "./types.ts";
 
 interface Check {
   name: string;

@@ -2,14 +2,14 @@ import { spawn } from "node:child_process";
 import { createWriteStream, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { getAdapter } from "./adapters/registry";
-import type { LaunchContext } from "./adapters/types";
-import { resolveAuth } from "./auth";
-import { loadConfig, runDir } from "./config";
-import { getRun, insertEvent, updateRun } from "./db";
-import { notifyTerminal } from "./notify";
-import type { Run, RunSpec } from "./types";
-import { verify } from "./verify";
+import { getAdapter } from "./adapters/registry.ts";
+import type { LaunchContext } from "./adapters/types.ts";
+import { resolveAuth } from "./auth.ts";
+import { loadConfig, runDir } from "./config.ts";
+import { getRun, insertEvent, updateRun } from "./db.ts";
+import { notifyTerminal } from "./notify.ts";
+import type { Run, RunSpec } from "./types.ts";
+import { verify } from "./verify.ts";
 
 /** Child env is built additively from empty - never inherited (SPEC: Auth & billing). */
 function baseEnv(): Record<string, string> {
