@@ -33,9 +33,14 @@ Two install-time-build designs were tried and rejected on evidence:
 - Storage stays dependency-free via `node:sqlite`; the package has zero runtime
   dependencies and no native modules.
 - **`dist/` is committed and shipped as-is.** Installs run no lifecycle scripts:
-  `files: ["dist"]`, `bin: dist/mc.js`, no `prepare`. Both
-  `npm install -g github:gary149/mission-control` and `npm link` from a clone
-  work deterministically on npm 10 and 11.
+  `files: ["dist"]`, `bin: dist/mc.js`, no `prepare`. The documented installs
+  are the GitHub archive-tarball URL and `npm link` from a clone, both
+  deterministic on npm 10 and 11.
+- The one-liner deliberately avoids `github:` git specs: `npm install -g` of a
+  git spec silently extracts a truncated package (5 of 16 dist files, byte-for-
+  byte reproducible on npm 10.9 and 11.11, local installs unaffected) - an
+  upstream npm reify bug our package cannot work around. The archive URL routes
+  through npm's tarball fetcher, which is correct.
 - Freshness is a CI gate: build then `git diff --exit-code -- dist`, so a stale
   committed dist can never merge.
 - Development runs the TypeScript source directly via Node's type stripping
