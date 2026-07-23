@@ -17,8 +17,13 @@ race or fail at install time. See
 compiled-binary distribution was retired.
 
 ```sh
-npm install -g github:gary149/mission-control
+npm install -g https://github.com/gary149/mission-control/archive/refs/heads/main.tar.gz
 ```
+
+(The tarball URL is deliberate: `npm install -g` with a `github:` git spec
+silently installs a truncated package - an npm bug on both npm 10 and 11 that
+drops most of the shipped files. The archive URL uses npm's tarball fetcher,
+which is correct.)
 
 or from a clone:
 
