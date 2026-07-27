@@ -231,6 +231,10 @@ describe("mission-control e2e (stub harness)", () => {
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
     assert.equal(done.verdict, "verified");
+    // The fixture emits tool_execution_update (real pi progress noise) - if the
+    // adapter mishandled it, parser_health would fail and cap this at unverifiable.
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "pi streaming progress events must not poison parser health");
     assert.equal(done.session_id, "019f0000-fake-7000-a000-000000000001");
     // Two turns at 0.001 each and (2000+1000)/(20+30) tokens - deltas must SUM.
     assert.ok(Math.abs(done.cost_usd - 0.002) < 1e-5, `cost_usd ${done.cost_usd} != ~0.002`);
