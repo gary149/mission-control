@@ -61,8 +61,15 @@ function isActive(run: Run): boolean {
  * every 500ms and only breaks once a terminal row produces no NEW events -
  * would see notifyTerminal's own fresh notify_result event as "new" on every
  * poll and never break, hammering the failing hook forever.
+ *
+ * `deliver` defaults to false: a caller that doesn't explicitly opt into
+ * delivery must not deliver, since false is the safe choice (it never
+ * spuriously fires a hook). Every delivering call site (`mc reap`, `mc
+ * harness check`'s poll) passes `true` explicitly; any caller that omits the
+ * argument - including ones added later without knowing about this flag -
+ * correctly falls back to the non-delivering, side-effect-free read path.
  */
-async function reapLostRuns(runs: Run[], deliver: boolean): Promise<Run[]> {
+async function reapLostRuns(runs: Run[], deliver = false): Promise<Run[]> {
   const config = deliver ? loadConfig() : null;
   const out: Run[] = [];
   for (const run of runs) {
