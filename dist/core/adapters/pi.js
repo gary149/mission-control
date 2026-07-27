@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
  * pi adapter, grounded in pi 0.81.0 `-p --mode json` (probed live):
  *   {"type":"session","version":3,"id":"<uuid>","cwd":...}       first line
  *   {"type":"turn_end","message":{usage:{input,output,totalTokens,cost:{total}}}}
- *   plus streaming noise (message_update, text_delta, toolcall_delta, ...)
+ *   plus streaming noise (message_update, text_delta, toolcall_delta,
+ *   tool_execution_update, ...) - all benign, must not trip parser health
  * pi computes a real dollar figure client-side per turn - the one harness where
  * cost is genuinely metered in every auth mode, so --budget is enforceable.
  * Sessions: --session-dir <dir> stores the session file; --session <id> resumes.
@@ -90,6 +91,7 @@ export const pi = {
             case "toolcall_start":
             case "toolcall_delta":
             case "tool_execution_start":
+            case "tool_execution_update":
                 break;
             case "toolcall_end": {
                 const call = obj.toolCall ?? obj.message?.content?.find?.((c) => c?.type === "toolCall") ?? {};
