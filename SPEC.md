@@ -115,13 +115,22 @@ Append-only per-run stream in an `events` table (`run_id, seq, ts, kind, payload
 fed by the adapter translating native output. Closed kind union:
 
 ```
-started | text | tool_call | tool_result | turn_end | cost_update | artifact |
+started | text | tool_call | tool_result | subagent | turn_end | cost_update | artifact |
 status_change | verify_result | notify_result | error | exited
 ```
 
 Adapters must map into this union or emit `error`; unknown native events are stored raw
 under `error` with a parse note, never dropped. This union is deliberately shaped so it
 could become an RPC wire vocabulary later (pi-mono style) without a schema migration.
+
+`subagent` carries internal task/subagent lifecycle as structured data
+(`phase, task_id, description, status`) without violating the one-Run-per-lead-session
+rule (ADR 0001): subagents still never become ledger rows; `mc tail` just gains a live
+activity feed and an orchestrator can render the tree straight from the stream.
+Currently emitted by claude-code (system subtypes `task_started | task_progress |
+task_updated | task_notification | background_tasks_changed`, shapes captured live);
+codex has no subagent events, pi's agent_* chatter is single-agent lifecycle, and
+kimi-code's CLI never writes subagent events to stdout (upstream #2130).
 
 ### HarnessAdapter
 

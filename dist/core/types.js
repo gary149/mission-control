@@ -3,6 +3,7 @@ export const EVENT_KINDS = [
     "text",
     "tool_call",
     "tool_result",
+    "subagent",
     "turn_end",
     "cost_update",
     "artifact",
