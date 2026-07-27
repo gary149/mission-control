@@ -40,6 +40,10 @@ emit({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOSt
 emit({ type: "agent_start" });
 emit({ type: "turn_start" });
 emit({ type: "toolcall_end", toolCall: { id: "call_1", name: "write", arguments: { path: "out.txt" } } });
+emit({ type: "tool_execution_start", id: "call_1" });
+// Streaming progress emitted mid-tool by real pi (observed live in run 92100d);
+// must be benign - it silently capped a real run at unverifiable before.
+emit({ type: "tool_execution_update", id: "call_1", output: "..." });
 emit({ type: "tool_execution_end", result: "ok" });
 emit({
   type: "turn_end",
