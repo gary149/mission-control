@@ -1,5 +1,7 @@
 # mission-control
 
+![mission-control](docs/hero.jpg)
+
 **Fire a coding agent at a task. Walk away. Get pinged with a verified result.**
 
 `mc` launches an agent CLI headlessly, supervises it to completion, mechanically checks
@@ -18,14 +20,16 @@ delegate to.
 ## First run
 
 ```sh
-mc run --harness claude-code --artifact limerick.txt "write a limerick about shipping on Friday into limerick.txt"
+mc run --harness claude-code --max-minutes 30 --artifact index.html \
+  "build a playable browser FPS in a single index.html: pointer-lock aim, WASD, targets that fall when shot"
 
 mc ls            # exit + verdict + cost, at a glance
-mc tail <id>     # follow the live event stream
+mc tail <id>     # live event stream - tool calls, subagents spinning up, cost ticking
 mc show <id>     # full record + verification evidence
 ```
 
-Each run gets an isolated workdir. `verified` means mc checked the declared artifact
+Yes, really - hand it a half-hour build and close the laptop. Each run executes in an
+isolated workdir, and `verified` means mc mechanically checked the declared artifact
 exists with real content - not that the agent claimed success.
 
 ## Harnesses
