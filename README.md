@@ -27,6 +27,19 @@ npm install -g https://github.com/gary149/mission-control/archive/refs/heads/mai
 Node >= 22.13, zero dependencies, nothing compiles. Same one-liner on every machine you
 delegate to.
 
+## Harnesses
+
+| | harness | wraps | works with | live `--budget` |
+|:-:|---|---|---|:-:|
+| <img src="docs/icons/claude.svg" width="18"> | `claude-code` | Claude Code | Claude login &middot; `ANTHROPIC_API_KEY` &middot; OpenRouter | |
+| <img src="docs/icons/codex.svg" width="18"> | `codex` | OpenAI Codex | ChatGPT login &middot; `OPENAI_API_KEY` &middot; OpenRouter | |
+| <img src="docs/icons/kimi.svg" width="18"> | `kimi-code` | Kimi Code | `MOONSHOT_API_KEY` &middot; OpenRouter | |
+| <img src="docs/icons/opencode.svg" width="18"> | `opencode` | opencode | `opencode auth login` &middot; OpenRouter | ✓ |
+| <img src="docs/icons/pi.svg" width="18"> | `pi` | pi | pi login &middot; OpenRouter | ✓ |
+
+Every adapter is grounded in a live probe of the real CLI and validated end-to-end:
+launch, event parsing, session capture, native resume.
+
 ## First run
 
 **Ask your agent:**
@@ -64,19 +77,6 @@ mc harness check opencode --gateway openrouter --model moonshotai/kimi-k3
                              # prove an adapter end-to-end against the real CLI
 mc help                      # every command and flag
 ```
-
-## Harnesses
-
-| | harness | wraps | works with | live `--budget` |
-|:-:|---|---|---|:-:|
-| <img src="docs/icons/claude.svg" width="18"> | `claude-code` | Claude Code | Claude login &middot; `ANTHROPIC_API_KEY` &middot; OpenRouter | |
-| <img src="docs/icons/codex.svg" width="18"> | `codex` | OpenAI Codex | ChatGPT login &middot; `OPENAI_API_KEY` &middot; OpenRouter | |
-| <img src="docs/icons/kimi.svg" width="18"> | `kimi-code` | Kimi Code | `MOONSHOT_API_KEY` &middot; OpenRouter | |
-| <img src="docs/icons/opencode.svg" width="18"> | `opencode` | opencode | `opencode auth login` &middot; OpenRouter | ✓ |
-| <img src="docs/icons/pi.svg" width="18"> | `pi` | pi | pi login &middot; OpenRouter | ✓ |
-
-Every adapter is grounded in a live probe of the real CLI and validated end-to-end:
-launch, event parsing, session capture, native resume.
 
 ## Any model, any harness
 
