@@ -11,6 +11,7 @@
  *   SLEEP:<ms>     linger before the result line (kill/timeout tests)
  *   DUMPENV:<path> write the full received env as JSON (poison test)
  */
+import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -43,6 +44,13 @@ emit({ type: "system", subtype: "init", session_id: "fake-session-123", model: "
 emit({ type: "system", subtype: "hook_started", hook_name: "SessionStart" });
 emit({ type: "system", subtype: "thinking_tokens", tokens: 42 });
 emit({ type: "system", subtype: "api_retry", attempt: 1 });
+// Subagent/background progress noise (observed 15k+ per long run on live fleet):
+emit({ type: "task_progress", task_id: "t1", progress: 0.5 });
+emit({ type: "tool_progress", tool_use_id: "tu1", elapsed_ms: 1200 });
+emit({ type: "task_started", task_id: "t1" });
+emit({ type: "task_notification", task_id: "t1", message: "working" });
+emit({ type: "task_updated", task_id: "t1" });
+emit({ type: "background_tasks_changed", tasks: [] });
 emit({ type: "assistant", message: { content: [{ type: "thinking", thinking: "..." }] } });
 emit({ type: "assistant", message: { content: [{ type: "text", text: "Working on it." }] } });
 emit({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: "out.txt" } }] } });
@@ -60,6 +68,23 @@ if (sleepMatch) {
 if (prompt.includes("FAIL")) {
   emit({ type: "result", subtype: "error_during_execution", total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 2 } });
   process.exit(1);
+}
+
+// GITCOMMIT: do the work and COMMIT it, leaving a clean tree - the shape the
+// commit-aware git_effect check must reward.
+if (prompt.includes("GITCOMMIT")) {
+  writeFileSync("out.txt", "committed deliverable\n");
+  execSync("git add -A && git -c user.email=fake@test -c user.name=fake commit -q -m 'fake work'", { stdio: "ignore" });
+  emit({
+    type: "result",
+    subtype: "success",
+    total_cost_usd: 0.1,
+    usage: { input_tokens: 100, output_tokens: 25 },
+    num_turns: 1,
+    result: "Committed.",
+    session_id: "fake-session-123",
+  });
+  process.exit(0);
 }
 
 writeFileSync("out.txt", "deliverable content\n");

@@ -52,6 +52,7 @@ export function verify(
   exitCode: number | null,
   isGit: boolean,
   parserHealthy = true,
+  headAtLaunch: string | null = null,
 ): VerifyResult {
   const checks: Check[] = [];
 
@@ -63,13 +64,24 @@ export function verify(
   });
 
   if (isGit) {
+    // Effect = commits made since launch OR a dirty tree. An agent that does
+    // its job and commits everything leaves a CLEAN tree - that must pass
+    // (fleet evidence: clean-committing runs were failed for exactly this).
     const porcelain = spawnSync("git", ["-C", run.workdir, "status", "--porcelain"], { encoding: "utf8" });
-    const changed = porcelain.stdout.trim().length > 0;
+    const dirtyPaths = porcelain.stdout.trim() ? porcelain.stdout.trim().split("\n").length : 0;
+    let commits = 0;
+    if (headAtLaunch) {
+      const count = spawnSync("git", ["-C", run.workdir, "rev-list", "--count", `${headAtLaunch}..HEAD`], {
+        encoding: "utf8",
+      });
+      if (count.status === 0) commits = Number(count.stdout.trim()) || 0;
+    }
+    const changed = dirtyPaths > 0 || commits > 0;
     checks.push({
       name: "git_effect",
       applicable: true,
       passed: changed,
-      detail: changed ? `${porcelain.stdout.trim().split("\n").length} path(s) changed` : "no changes in worktree",
+      detail: changed ? `${commits} commit(s), ${dirtyPaths} path(s) changed` : "no commits and clean tree",
     });
   }
 
