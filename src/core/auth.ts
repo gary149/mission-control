@@ -82,6 +82,7 @@ const SUBSCRIPTION_CHECKS: Record<string, { check: () => string | null; hint: st
 const API_KEY_VARS: Record<string, string> = {
   "claude-code": "ANTHROPIC_API_KEY",
   codex: "OPENAI_API_KEY",
+  "kimi-code": "MOONSHOT_API_KEY",
 };
 
 /** Cost basis is a property of (harness, auth mode), decided here, never inferred later. */
@@ -92,6 +93,7 @@ function costBasisFor(harness: string, mode: RunSpec["auth"]["mode"]): CostBasis
     return "unavailable"; // gateway: CLI's figure prices non-Anthropic tokens on Anthropic's table
   }
   if (harness === "codex") return "unavailable"; // exec --json never carries a dollar figure, any mode
+  if (harness === "kimi-code") return "unavailable"; // stream-json carries no usage or dollar telemetry, any mode
   if (harness === "pi") return "metered_reported"; // pi computes real per-turn cost client-side, every mode
   return "unavailable";
 }
@@ -107,6 +109,14 @@ export function resolveAuth(spec: RunSpec, adapter: HarnessAdapter, config: McCo
     throw new PreflightError(`harness "${adapter.name}" does not support auth mode "${mode}"${hint}`);
   }
 
+  // kimi-code gets its model injected via KIMI_MODEL_NAME into a scratch home
+  // that has no config.toml, so there is no default_model to fall back to.
+  if (adapter.name === "kimi-code" && !spec.model) {
+    throw new PreflightError(
+      `kimi-code requires --model (mc injects it via KIMI_MODEL_NAME; the per-run scratch KIMI_CODE_HOME has no default_model)`,
+    );
+  }
+
   const costBasis = costBasisFor(adapter.name, mode);
   // Adapter-specific refusal FIRST so the advice is correct: for claude-code no
   // auth mode can enforce a dollar cap (cost arrives only in the terminal result
@@ -117,9 +127,16 @@ export function resolveAuth(spec: RunSpec, adapter: HarnessAdapter, config: McCo
     );
   }
   if (spec.budget_usd != null && costBasis !== "metered_reported") {
+    // Only advise --api-key when some mode of THIS harness is actually metered;
+    // for codex/kimi-code no mode is, and wrong advice just bounces the user.
+    const anyMetered = adapter.capabilities.auth_modes.some(
+      (m) => costBasisFor(adapter.name, m) === "metered_reported",
+    );
     throw new PreflightError(
       `--budget has no meaning for ${adapter.name} under ${mode} auth (cost_basis: ${costBasis}). ` +
-        `Drop --budget and use --max-minutes, or rerun with --api-key for a metered run.`,
+        (anyMetered
+          ? `Drop --budget and use --max-minutes, or rerun with --api-key for a metered run.`
+          : `Drop --budget and use --max-minutes (no ${adapter.name} auth mode reports metered cost).`),
     );
   }
 
