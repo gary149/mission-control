@@ -1,86 +1,93 @@
 # mission-control
 
-Control plane for delegated agent runs. `mc` launches a coding-agent harness on a task,
-watches it to termination with a detached per-run supervisor, mechanically verifies the
-declared outputs, and pushes you the truth.
+**Fire a coding agent at a task. Walk away. Get pinged with a verified result.**
 
-See [SPEC.md](./SPEC.md) for the full design, [CONTEXT.md](./CONTEXT.md) for the domain
-glossary, and [docs/adr/](./docs/adr/) for the decisions.
+`mc` launches an agent CLI headlessly, supervises it to completion, mechanically checks
+the outputs it promised, and reports two independent truths per run: `exit` (did the
+process finish cleanly) and `verdict` (did the work actually check out).
 
 ## Install
-
-`mc` is an npm package on Node.js >= 22.13 with zero runtime dependencies
-(SQLite via `node:sqlite`, no native modules). The compiled `dist/` is
-committed, so installs run no scripts at all - nothing builds, nothing can
-race or fail at install time. See
-[ADR 0002](./docs/adr/0002-node-runtime-and-npm-distribution.md) for why the
-compiled-binary distribution was retired.
 
 ```sh
 npm install -g https://github.com/gary149/mission-control/archive/refs/heads/main.tar.gz
 ```
 
-(The tarball URL is deliberate: `npm install -g` with a `github:` git spec
-silently installs a truncated package - an npm bug on both npm 10 and 11 that
-drops most of the shipped files. The archive URL uses npm's tarball fetcher,
-which is correct.)
+Node >= 22.13, zero dependencies, nothing compiles. Same one-liner on every machine you
+delegate to.
 
-or from a clone:
+## First run
 
 ```sh
-git clone https://github.com/gary149/mission-control && cd mission-control
-npm link       # puts `mc` on PATH
+mc run --harness claude-code --artifact haiku.txt "write a haiku about shipping into haiku.txt"
+
+mc ls            # exit + verdict + cost, at a glance
+mc tail <id>     # follow the live event stream
+mc show <id>     # full record + verification evidence
 ```
 
-Remote machines are the same commands (install Node once per host; no
-toolchain beyond npm, no signing, nothing to download by hand).
+Each run gets an isolated workdir. `verified` means mc checked the declared artifact
+exists with real content - not that the agent claimed success.
 
-Development: `node src/mc.ts ...` runs the TypeScript source directly
-(Node >= 22.18 strips types natively); `npm run build` refreshes `dist/`,
-and CI fails any change where the committed `dist/` is stale.
+## Harnesses
 
-## Use
-
-Five harness adapters - claude-code, codex, kimi-code, opencode, pi - each verified
-end-to-end against the real CLI by `mc harness check` (launch, verify, session capture,
-native resume).
+| | harness | wraps | works with | live `--budget` |
+|:-:|---|---|---|:-:|
+| <img src="docs/icons/claude.svg" width="18"> | `claude-code` | Claude Code | Claude login &middot; `ANTHROPIC_API_KEY` &middot; OpenRouter | |
+| <img src="docs/icons/codex.svg" width="18"> | `codex` | OpenAI Codex | ChatGPT login &middot; `OPENAI_API_KEY` &middot; OpenRouter | |
+| <img src="docs/icons/kimi.svg" width="18"> | `kimi-code` | Kimi Code | `MOONSHOT_API_KEY` &middot; OpenRouter | |
+| <img src="docs/icons/opencode.svg" width="18"> | `opencode` | opencode | `opencode auth login` &middot; OpenRouter | ✓ |
+| <img src="docs/icons/pi.svg" width="18"> | `pi` | pi | pi login &middot; OpenRouter | ✓ |
 
 ```sh
-mc help
-
-# Subscription (default; uses the CLI's own resident login):
-mc run --harness claude-code --artifact out/report.md "write the report"
-
-# Any model via OpenRouter (key must be resident on this host):
-mc run --harness claude-code --gateway openrouter \
-  --model moonshotai/kimi-k3 --max-minutes 30 --artifact hello.txt "..."
-
-# Moonshot's own CLI as the harness (model required; api_key mode uses MOONSHOT_API_KEY):
-mc run --harness kimi-code --gateway openrouter \
-  --model moonshotai/kimi-k3 --max-minutes 30 --artifact hello.txt "..."
-
-# opencode via OpenRouter (metered per-step cost, so --budget is enforceable):
-mc run --harness opencode --gateway openrouter \
-  --model moonshotai/kimi-k3 --budget 2 --artifact hello.txt "..."
-
-mc resume <id> "also add tests"   # continue the session, new linked run, same workdir
-                                  # (inherits the parent's artifacts/visual/caps)
-mc resume <id> --fresh --at <sha> "start over from the checkpoint"
-                                  # checkpoint restart: NEW worktree at the commit,
-                                  # NEW session - for escaping stuck sessions
-mc reap                           # cron-safe lost-run sweep + pending notifications
-mc harness check codex            # live validation against the real CLI (costs cents)
-
-mc ls            # what ran, both status axes, cost, age
-mc tail <id>     # follow the normalized event stream
-mc show <id>     # full run record + verification evidence
-mc kill <id>
-mc harness ls    # adapters, capabilities, live auth probes
+mc harness ls              # what's installed here + which auth is ready
+mc harness check opencode  # prove an adapter end-to-end against the real CLI
 ```
 
-State lives in `~/.mission-control/` (override with `MC_HOME`): `mc.db` (runs + events),
-`runs/<id>/` (spec.json, isolated workdir, stdout.jsonl, stderr.log). Notifications:
-add `[notify] exec/webhook` to `~/.mission-control/config.toml` - one push per terminal
-transition with both status axes.
+Every adapter is grounded in a live probe of the real CLI and validated end-to-end:
+launch, event parsing, session capture, native resume.
 
-Tests run against a stub harness (no API cost): `npm test`.
+## Any model, any harness
+
+The default auth is each CLI's own resident login. With an `OPENROUTER_API_KEY` on the
+host, any OpenRouter model runs through any harness:
+
+```sh
+mc run --harness opencode --gateway openrouter --model moonshotai/kimi-k3 \
+  --budget 2 --artifact app.py "build the thing"
+```
+
+Where the harness reports real metered cost (`opencode`, `pi`), `--budget` kills the
+run mid-flight the moment spend crosses the cap. Everywhere else use `--max-minutes`.
+
+## Follow-ups
+
+```sh
+mc resume <id> "also add tests"        # continue the same session, same workdir
+mc resume <id> --fresh --at <sha> "…"  # restart clean from a git checkpoint,
+                                       # for escaping stuck sessions
+```
+
+## Notifications
+
+One push per finished run, carrying both `exit` and `verdict`:
+
+```toml
+# ~/.mission-control/config.toml
+[notify]
+exec = "my-notify-script"                 # receives the run record as JSON on stdin
+# or
+webhook = "https://example.com/hook"      # POSTed the same JSON
+```
+
+`mc reap` (cron it) sweeps runs whose supervisor died and delivers their pending
+notifications - nothing terminates silently.
+
+## Going deeper
+
+- [SPEC.md](./SPEC.md) - full design: adapters, verification, auth, cost model
+- [CONTEXT.md](./CONTEXT.md) - domain glossary
+- [docs/adr/](./docs/adr/) - decisions and their reasons
+
+State lives in `~/.mission-control/` (`MC_HOME` to relocate). `npm test` runs the full
+e2e suite against stub CLIs - no API cost. Development: `node src/mc.ts …` runs
+straight from source; `npm run build` refreshes the committed `dist/`.
