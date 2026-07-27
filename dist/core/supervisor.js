@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import { getAdapter } from "./adapters/registry.js";
 import { resolveAuth } from "./auth.js";
 import { loadConfig, runDir } from "./config.js";
-import { getRun, insertEvent, updateRun } from "./db.js";
+import { eventsAfter, getRun, insertEvent, updateRun } from "./db.js";
 import { notifyTerminal } from "./notify.js";
 import { verify } from "./verify.js";
 /** Child env is built additively from empty - never inherited (SPEC: Auth & billing). */
@@ -192,8 +192,16 @@ export async function supervise(runId) {
     // Classification: a run is `killed` only once the process actually died from
     // a signal (cap or `mc kill`); the CLI never pre-marks terminal state.
     const current = getRun(runId);
+    // `mc kill` runs in a separate CLI process: it writes a kill_requested
+    // status_change event and sends SIGTERM, but the run stays `running` until
+    // THIS process observes the child actually exit. A harness that traps
+    // SIGTERM and exits 0 anyway must still be classified `killed` - the user
+    // asked it to stop, so a clean exit afterward is not a success. Re-read via
+    // eventsAfter (not a local flag) because the event was written by that
+    // other process, not this one.
+    const killWasRequested = eventsAfter(runId, 0).some((e) => e.kind === "status_change" && e.payload?.kill_requested === true);
     let exit;
-    if (killedByCap || signal != null)
+    if (killedByCap || signal != null || killWasRequested)
         exit = "killed";
     // exitCode === 0 is necessary but not sufficient: a harness that reports a
     // failed/aborted final turn but exits the process clean (pi's print-mode

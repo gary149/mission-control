@@ -6,7 +6,7 @@ import { getAdapter } from "./adapters/registry.ts";
 import type { LaunchContext } from "./adapters/types.ts";
 import { resolveAuth } from "./auth.ts";
 import { loadConfig, runDir } from "./config.ts";
-import { getRun, insertEvent, updateRun } from "./db.ts";
+import { eventsAfter, getRun, insertEvent, updateRun } from "./db.ts";
 import { notifyTerminal } from "./notify.ts";
 import type { Run, RunSpec } from "./types.ts";
 import { verify } from "./verify.ts";
@@ -197,8 +197,18 @@ export async function supervise(runId: string): Promise<void> {
   // Classification: a run is `killed` only once the process actually died from
   // a signal (cap or `mc kill`); the CLI never pre-marks terminal state.
   const current = getRun(runId)!;
+  // `mc kill` runs in a separate CLI process: it writes a kill_requested
+  // status_change event and sends SIGTERM, but the run stays `running` until
+  // THIS process observes the child actually exit. A harness that traps
+  // SIGTERM and exits 0 anyway must still be classified `killed` - the user
+  // asked it to stop, so a clean exit afterward is not a success. Re-read via
+  // eventsAfter (not a local flag) because the event was written by that
+  // other process, not this one.
+  const killWasRequested = eventsAfter(runId, 0).some(
+    (e) => e.kind === "status_change" && (e.payload as { kill_requested?: boolean } | null)?.kill_requested === true,
+  );
   let exit: Run["exit"];
-  if (killedByCap || signal != null) exit = "killed";
+  if (killedByCap || signal != null || killWasRequested) exit = "killed";
   // exitCode === 0 is necessary but not sufficient: a harness that reports a
   // failed/aborted final turn but exits the process clean (pi's print-mode
   // JSON path, confirmed live) must not land here as a false green.
