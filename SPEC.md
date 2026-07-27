@@ -58,7 +58,7 @@ Hetzner box, plus deep reads of openclaw, omnigent, nanoclaw, pi-mono, agentsvie
 | 5 | Verification | Two-axis status: `exit` x `verdict`; DONE = succeeded AND verified |
 | 6 | Remote | Install per host; engine is SSH-free; driven via plain `ssh box mc ...` with specs over stdin (revised 2026-07-20, was: `--host` SSH sugar in mc) |
 | 7 | Notifications | Generic per-host `on_terminal` hook (exec and/or webhook); Telegram example config |
-| 8 | Follow-ups | `mc resume` = new run linked by `parent_run_id`, harness-native resume, capability-gated |
+| 8 | Follow-ups | `mc resume` = new run linked by `parent_run_id`, harness-native resume, capability-gated; inherits the parent's artifacts/visual/caps unless overridden (a continuation that silently drops its declared checks stops being verifiable) |
 | 9 | agentsview | Loose coupling: converge on conventions, store `session_id`, zero dependency |
 | 10 | V1 adapters | claude-code, codex, pi (one per integration style: stream-json, exec-json, RPC) |
 | 11 | Cost | Always record (unknown, never 0, when unparseable); opt-in per-run `--budget` kill; no global policy |
@@ -116,7 +116,7 @@ fed by the adapter translating native output. Closed kind union:
 
 ```
 started | text | tool_call | tool_result | turn_end | cost_update | artifact |
-status_change | verify_result | error | exited
+status_change | verify_result | notify_result | error | exited
 ```
 
 Adapters must map into this union or emit `error`; unknown native events are stored raw
@@ -278,9 +278,16 @@ not a silent absence.
 Runs before any terminal verdict. v1 verifiers, in order, all cheap and local:
 
 1. **exit code** of the harness process,
-2. **git effect**: `git status --porcelain` non-empty in the run's worktree (for repo tasks),
+2. **git effect** (repo tasks): commits made since launch (HEAD recorded at launch in
+   the spec, compared via `rev-list --count`) OR a dirty worktree. An agent that
+   commits everything and leaves a clean tree has produced an effect - fleet evidence
+   showed the old dirty-tree-only check failing exactly the runs that finished
+   cleanest,
 3. **artifacts**: every path declared in the spec exists and is non-trivial (>0 bytes,
-   basic type sniff).
+   basic type sniff),
+4. **parser health**: tracks BLINDNESS only - lines mc could not read (`unparsed`) or
+   did not recognize (`unknown-native-event`). Harness-REPORTED errors are cleanly
+   parsed data and never cap the verdict; blindness caps it at `unverifiable`.
 
 Task specs declare expected artifacts up front; a run with no declared artifacts and no
 git effect can at best reach `unverifiable`. Anything flagged visual in the spec
