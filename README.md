@@ -30,6 +30,7 @@ delegate to.
 ## First run
 
 ```sh
+# no --model needed: uses your Claude login and its default model
 mc run --harness claude-code --max-minutes 360 --artifact index.html \
   "build a playable browser FPS in a single index.html: pointer-lock aim, WASD, targets that fall when shot"
 ```
