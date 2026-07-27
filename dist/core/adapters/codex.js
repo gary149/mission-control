@@ -119,6 +119,32 @@ export const codex = {
                 else if (item.type === "reasoning" || item.type === "todo_list") {
                     break; // benign
                 }
+                else if (item.type === "mcp_tool_call") {
+                    // Real codex SDK item type (confirmed against the installed
+                    // @openai/codex 0.145.0 exec-item enum, alongside command_execution/
+                    // file_change) - previously fell to the `else` below and poisoned
+                    // parser health on any run that used an MCP tool.
+                    events.push({
+                        kind: "tool_call",
+                        payload: {
+                            name: item.tool_name ?? item.name ?? item.server ?? "mcp_tool_call",
+                            input: JSON.stringify(item.arguments ?? item.invocation ?? {}).slice(0, 2000),
+                        },
+                    });
+                    if (item.output != null || item.result != null || item.error != null) {
+                        events.push({
+                            kind: "tool_result",
+                            payload: { excerpt: String(item.output ?? item.result ?? item.error ?? "").slice(0, 500) },
+                        });
+                    }
+                }
+                else if (item.type === "web_search") {
+                    // Real codex SDK item type, same enum as mcp_tool_call above.
+                    events.push({
+                        kind: "tool_call",
+                        payload: { name: "web_search", input: String(item.query ?? "").slice(0, 2000) },
+                    });
+                }
                 else if (item.type === "error") {
                     // codex reports warnings/errors as items (e.g. "Model metadata for
                     // `x` not found") - cleanly parsed, so it must not poison parser
