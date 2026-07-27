@@ -2,11 +2,15 @@
 /**
  * Stub codex for the conformance suite. Emits the exec --json JSONL shape
  * captured VERBATIM from codex-cli 0.144.6 on 2026-07-22 (see the adapter's
- * doc comment). Prompt directives (env is stripped by design): FAIL, DUMPENV:<p>.
+ * doc comment). Prompt directives (env is stripped by design): FAIL, DUMPENV:<p>,
+ * MCPTOOLS (emit mcp_tool_call/web_search items - real codex SDK item types
+ * confirmed against the installed @openai/codex 0.145.0 binary's item-type
+ * enum, previously unmapped and parser-health-poisoning), MKDIRARTIFACT
+ * (mkdir the declared out.txt path instead of writing a file to it).
  * When invoked as `exec resume <id> <prompt>`, appends to the target file to
  * simulate native session continuation.
  */
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 
@@ -41,12 +45,24 @@ emit({
 emit({ type: "item.completed", item: { id: "item_w", type: "error", message: "Model metadata for `fake/model` not found. Defaulting to fallback metadata" } });
 emit({ type: "item.completed", item: { id: "item_t", type: "todo_list", items: [{ text: "step", completed: true }] } });
 
+if (prompt.includes("MCPTOOLS")) {
+  emit({
+    type: "item.completed",
+    item: { id: "item_m", type: "mcp_tool_call", server: "fake-server", tool_name: "fake_tool", arguments: { q: "x" }, output: "tool ok" },
+  });
+  emit({
+    type: "item.completed",
+    item: { id: "item_s", type: "web_search", query: "fake search query" },
+  });
+}
+
 if (prompt.includes("FAIL")) {
   emit({ type: "turn.failed", error: "simulated failure" });
   process.exit(1);
 }
 
-if (isResume) appendFileSync("out.txt", "resumed OK\n");
+if (prompt.includes("MKDIRARTIFACT")) mkdirSync("out.txt");
+else if (isResume) appendFileSync("out.txt", "resumed OK\n");
 else writeFileSync("out.txt", "deliverable content\n");
 
 emit({

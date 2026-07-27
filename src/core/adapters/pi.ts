@@ -97,6 +97,19 @@ export const pi: HarnessAdapter = {
       case "toolcall_delta":
       case "tool_execution_start":
       case "tool_execution_update":
+      // Real members of pi's AgentSessionEvent union (confirmed against the
+      // installed @earendil-works/pi-coding-agent 0.81.0 type defs), fired on
+      // ordinary long runs - compaction, retries, the message queue, session
+      // metadata. Previously unhandled: fell to `default` and capped the
+      // verdict at unverifiable on every run long enough to trigger them.
+      case "queue_update":
+      case "compaction_start":
+      case "compaction_end":
+      case "auto_retry_start":
+      case "auto_retry_end":
+      case "entry_appended":
+      case "session_info_changed":
+      case "thinking_level_changed":
         break;
       case "toolcall_end": {
         const call = obj.toolCall ?? obj.message?.content?.find?.((c: any) => c?.type === "toolCall") ?? {};
@@ -114,24 +127,31 @@ export const pi: HarnessAdapter = {
       case "turn_end": {
         const message = obj.message ?? {};
         const usage = message.usage ?? {};
-        // pi exits 0 even when the turn errored (observed live: OAuth refresh
-        // failure with stopReason "error") - surface it, never let it pass as a
-        // clean turn.
-        if (message.stopReason === "error") {
+        // pi exits 0 even when the turn errored or was aborted (observed live:
+        // OAuth refresh failure with stopReason "error"; "aborted" is the same
+        // terminal shape per pi's StopReason type) - surface it, never let it
+        // pass as a clean turn. `usage` is a required field on the terminal
+        // AssistantMessage in EVERY stop reason (including error/aborted), so
+        // it is recorded here too - dropping it would silently understate
+        // cost_usd/tokens and let a run coast under --budget on its way out.
+        const isError = message.stopReason === "error" || message.stopReason === "aborted";
+        if (isError) {
           events.push({
             kind: "error",
-            payload: { note: "harness-error", message: String(message.errorMessage ?? "turn errored").slice(0, 500) },
+            payload: {
+              note: "harness-error",
+              message: String(message.errorMessage ?? `turn ${message.stopReason}`).slice(0, 500),
+            },
           });
-          events.push({ kind: "turn_end", payload: { is_error: true, stop_reason: "error" } });
-          break;
+        } else {
+          const text = Array.isArray(message.content)
+            ? message.content
+                .filter((c: any) => c?.type === "text" && c.text)
+                .map((c: any) => c.text)
+                .join("\n")
+            : "";
+          if (text) events.push({ kind: "text", payload: { text: text.slice(0, 2000) } });
         }
-        const text = Array.isArray(message.content)
-          ? message.content
-              .filter((c: any) => c?.type === "text" && c.text)
-              .map((c: any) => c.text)
-              .join("\n")
-          : "";
-        if (text) events.push({ kind: "text", payload: { text: text.slice(0, 2000) } });
         const costTotal = usage.cost?.total;
         update = {
           cost_usd_delta: typeof costTotal === "number" && costTotal > 0 ? costTotal : undefined,
@@ -142,7 +162,7 @@ export const pi: HarnessAdapter = {
           kind: "cost_update",
           payload: { cost_usd: costTotal ?? null, tokens_in: usage.input ?? null, tokens_out: usage.output ?? null },
         });
-        events.push({ kind: "turn_end", payload: { is_error: false, stop_reason: message.stopReason } });
+        events.push({ kind: "turn_end", payload: { is_error: isError, stop_reason: message.stopReason } });
         break;
       }
       case "error":

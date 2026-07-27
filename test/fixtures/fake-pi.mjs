@@ -3,7 +3,13 @@
  * Stub pi for the conformance suite. Emits the -p --mode json JSONL shape
  * captured VERBATIM from pi 0.81.0 on 2026-07-22 (two turns, so the per-turn
  * cost/token DELTAS must accumulate). Prompt directives: FAIL, DUMPENV:<p>,
- * OVERBUDGET (inflate per-turn cost to trip a --budget cap).
+ * OVERBUDGET (inflate per-turn cost to trip a --budget cap), SOFTFAIL
+ * (terminal turn_end with stopReason "error" but process exit 0 - pi's real
+ * false-green shape, confirmed live: print-mode.js never sets a non-zero
+ * exit code in `--mode json`, only in `--mode text`), ABORTFAIL (same shape,
+ * stopReason "aborted" - the other terminal-failure StopReason), NOISYEVENTS
+ * (emit the real-but-previously-unmapped queue_update/compaction/auto_retry
+ * events).
  * `--session <id>` simulates native resume by appending to the target file.
  */
 import { appendFileSync, writeFileSync } from "node:fs";
@@ -38,6 +44,60 @@ const usage = (input, output) => ({
 
 emit({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() });
 emit({ type: "agent_start" });
+
+if (prompt.includes("NOISYEVENTS")) {
+  // Real members of pi's AgentSessionEvent union (compaction, retries, the
+  // steering/follow-up queue) - must stay benign, never poison parser health.
+  emit({ type: "queue_update", steering: [], followUp: [] });
+  emit({ type: "compaction_start", reason: "threshold" });
+  emit({ type: "compaction_end", reason: "threshold", result: undefined, aborted: false, willRetry: false });
+  emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 500, errorMessage: "rate limited" });
+  emit({ type: "auto_retry_end", success: true, attempt: 1 });
+}
+
+if (prompt.includes("SOFTFAIL")) {
+  // pi's real false-green shape: the final turn errors out, but `--mode json`
+  // never sets a non-zero process exit code for it (unlike `--mode text`).
+  // The artifact is still written first - present-but-irrelevant, since a
+  // failed terminal turn must fail the run regardless of what's on disk.
+  writeFileSync("out.txt", "deliverable content\n");
+  emit({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      content: [],
+      provider: "openrouter",
+      model: "fake/model",
+      usage: usage(400, 5),
+      stopReason: "error",
+      errorMessage: "simulated soft failure: process exits 0 anyway",
+    },
+  });
+  emit({ type: "agent_end" });
+  process.exit(0);
+}
+
+if (prompt.includes("ABORTFAIL")) {
+  // Same false-green shape as SOFTFAIL, stopReason "aborted" instead of
+  // "error" - both terminal StopReasons must be treated as a failed turn,
+  // and both must still carry their `usage` into cost/token accounting.
+  writeFileSync("out.txt", "deliverable content\n");
+  emit({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      content: [],
+      provider: "openrouter",
+      model: "fake/model",
+      usage: usage(300, 7),
+      stopReason: "aborted",
+      errorMessage: "simulated abort: process exits 0 anyway",
+    },
+  });
+  emit({ type: "agent_end" });
+  process.exit(0);
+}
+
 emit({ type: "turn_start" });
 emit({ type: "toolcall_end", toolCall: { id: "call_1", name: "write", arguments: { path: "out.txt" } } });
 emit({ type: "tool_execution_start", id: "call_1" });
