@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 const FIXTURE = fileURLToPath(new URL("./fixtures/fake-claude.mjs", import.meta.url));
 const FIXTURE_CODEX = fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url));
 const FIXTURE_KIMI = fileURLToPath(new URL("./fixtures/fake-kimi.mjs", import.meta.url));
+const FIXTURE_OPENCODE = fileURLToPath(new URL("./fixtures/fake-opencode.mjs", import.meta.url));
 const FIXTURE_PI = fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url));
 
 let home: string;
@@ -46,12 +47,13 @@ describe("mission-control e2e (stub harness)", () => {
     process.env.MC_CLAUDE_BIN = FIXTURE;
     process.env.MC_CODEX_BIN = FIXTURE_CODEX;
     process.env.MC_KIMI_BIN = FIXTURE_KIMI;
+    process.env.MC_OPENCODE_BIN = FIXTURE_OPENCODE;
     process.env.MC_PI_BIN = FIXTURE_PI;
     process.env.ANTHROPIC_API_KEY = "sk-test-not-real";
     // Poison: resident on the host, must never reach a child (additive-from-empty env).
     process.env.OPENROUTER_API_KEY = "or-poison-not-real";
     process.env.HF_TOKEN = "hf-poison-not-real";
-    for (const fixture of [FIXTURE, FIXTURE_CODEX, FIXTURE_KIMI, FIXTURE_PI]) chmodSync(fixture, 0o755);
+    for (const fixture of [FIXTURE, FIXTURE_CODEX, FIXTURE_KIMI, FIXTURE_OPENCODE, FIXTURE_PI]) chmodSync(fixture, 0o755);
     // Notify hook writes its payload to a file we can assert on.
     writeFileSync(join(home, "config.toml"), `[notify]\nexec = "cat > ${home}/notified.json"\n`);
   });
@@ -429,6 +431,139 @@ describe("mission-control e2e (stub harness)", () => {
           baseSpec({ harness: "kimi-code", model: "kimi-for-coding", auth: { mode: "subscription" } }) as never,
         ),
       /does not support auth mode "subscription"/,
+    );
+  });
+
+  test("opencode: verified gateway run; metered per-step cost and tokens ACCUMULATE", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const envDump = join(home, "opencode-env.json");
+    const run = launch(
+      baseSpec({
+        harness: "opencode",
+        model: "moonshotai/kimi-k3",
+        prompt: `produce out.txt DUMPENV:${envDump}`,
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    // Probed live: step_finish.cost is a sane per-step delta on the openrouter
+    // path, so gateway mode is genuinely metered (unlike subscription).
+    assert.equal(run.cost_basis, "metered_reported");
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "verified");
+    assert.equal(done.session_id, "ses_fake05772ffeXi7yksg5cygHR7");
+    // Two steps: 6477+621 in, 76+27 out, 0.0216654+0.0055986 dollars - deltas SUM.
+    assert.equal(done.tokens_in, 7098);
+    assert.equal(done.tokens_out, 103);
+    assert.ok(Math.abs(done.cost_usd - 0.027264) < 1e-6, `cost_usd ${done.cost_usd} != ~0.027264`);
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "step_start noise must not poison parser health");
+
+    // Full XDG isolation + exactly one credential, delivered under the name
+    // opencode actually reads (OPENROUTER_API_KEY); nothing else leaks.
+    const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
+    assert.equal(childEnv.OPENROUTER_API_KEY, "or-poison-not-real");
+    assert.equal(childEnv.OPENCODE_DISABLE_AUTOUPDATE, "1");
+    for (const v of ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
+      assert.ok(String(childEnv[v]).includes("/opencode-home/"), `${v} not under scratch opencode-home`);
+    }
+    assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+    assert.equal(childEnv.HF_TOKEN, undefined);
+  });
+
+  test("opencode: mid-stream FAIL lands failed_verification with a HEALTHY parser", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const run = launch(
+      baseSpec({
+        harness: "opencode",
+        model: "moonshotai/kimi-k3",
+        prompt: "fail on purpose FAIL",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "failed");
+    assert.equal(done.verdict, "failed_verification");
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "a cleanly parsed error envelope must not poison parser health");
+  });
+
+  test("opencode: native resume via -s continues the same session", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const parentRun = launch(
+      baseSpec({
+        harness: "opencode",
+        model: "moonshotai/kimi-k3",
+        prompt: "first step: produce out.txt",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const parent = await waitTerminal(() => getRun(parentRun.id));
+    assert.equal(parent.session_id, "ses_fake05772ffeXi7yksg5cygHR7");
+
+    const resumed = launch(
+      baseSpec({
+        harness: "opencode",
+        model: "moonshotai/kimi-k3",
+        prompt: "second step: append",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+      { parent },
+    );
+    const resumedDone = await waitTerminal(() => getRun(resumed.id));
+    assert.equal(resumedDone.exit, "succeeded");
+    assert.equal(resumedDone.session_id, parent.session_id);
+    const content = readFileSync(join(parent.workdir, "out.txt"), "utf8");
+    assert.ok(content.includes("resumed OK")); // the fake appends only under -s
+  });
+
+  test("opencode: --budget is enforceable mid-run in gateway mode (metered deltas)", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
+
+    const run = launch(
+      baseSpec({
+        harness: "opencode",
+        model: "moonshotai/kimi-k3",
+        prompt: "spend too much OVERBUDGET",
+        artifacts: ["out.txt"],
+        budget_usd: 1,
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "killed");
+    const capEvents = eventsAfter(run.id, 0).filter(
+      (e: any) => e.kind === "error" && (e.payload as any)?.note === "cap-exceeded",
+    );
+    assert.equal(capEvents.length, 1);
+    assert.ok(String((capEvents[0]!.payload as any).detail).includes("budget"));
+  });
+
+  test("opencode: subscription without a provider-prefixed model is refused", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    // Locally (resident auth.json): the model-requirement error. CI: no-login. Both fail closed.
+    assert.throws(
+      () => launch(baseSpec({ harness: "opencode", auth: { mode: "subscription" } }) as never),
+      /opencode requires --model|no resident opencode login/,
+    );
+  });
+
+  test("opencode: api_key mode refused with an honest rationale", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(
+      () => launch(baseSpec({ harness: "opencode", auth: { mode: "api_key" } }) as never),
+      /does not support auth mode "api_key"[\s\S]*provider prefix/,
     );
   });
 

@@ -60,9 +60,40 @@ function piSubscriptionModelCheck(spec) {
         throw new PreflightError(`could not read pi's auth.json to verify provider "${provider}"`);
     }
 }
+function opencodeAuthFile() {
+    const dataHome = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share");
+    return join(dataHome, "opencode", "auth.json");
+}
+function opencodeSubscriptionCheck() {
+    const authFile = opencodeAuthFile();
+    return existsSync(authFile) ? authFile : null;
+}
+/**
+ * Mirrors piSubscriptionModelCheck: mc cannot vouch for opencode's ambient
+ * default-model resolution, so subscription runs require an explicit
+ * provider-prefixed model whose provider has a stored credential slot.
+ */
+function opencodeSubscriptionModelCheck(spec) {
+    if (!spec.model || !spec.model.includes("/")) {
+        throw new PreflightError(`opencode requires --model with a provider prefix (e.g. anthropic/claude-sonnet-4-5): mc cannot vouch for its ambient default-model resolution`);
+    }
+    const provider = spec.model.split("/")[0];
+    try {
+        const providers = Object.keys(JSON.parse(readFileSync(opencodeAuthFile(), "utf8")));
+        if (!providers.includes(provider)) {
+            throw new PreflightError(`opencode has no stored credential for provider "${provider}" (auth.json has: ${providers.join(", ") || "none"}); run \`opencode auth login\` to add it, or use --gateway openrouter`);
+        }
+    }
+    catch (error) {
+        if (error instanceof PreflightError)
+            throw error;
+        throw new PreflightError(`could not read opencode's auth.json to verify provider "${provider}"`);
+    }
+}
 const SUBSCRIPTION_CHECKS = {
     "claude-code": { check: claudeSubscriptionCheck, hint: "run `claude login` (or `claude setup-token` for headless) here first" },
     codex: { check: codexSubscriptionCheck, hint: "run `codex login` here first" },
+    opencode: { check: opencodeSubscriptionCheck, hint: "run `opencode auth login` here first (stores a credential in ~/.local/share/opencode/auth.json)" },
     pi: { check: piSubscriptionCheck, hint: "run `pi` once interactively to store provider credentials in ~/.pi/agent/auth.json" },
 };
 const API_KEY_VARS = {
@@ -83,6 +114,12 @@ function costBasisFor(harness, mode) {
         return "unavailable"; // exec --json never carries a dollar figure, any mode
     if (harness === "kimi-code")
         return "unavailable"; // stream-json carries no usage or dollar telemetry, any mode
+    if (harness === "opencode") {
+        // Gateway (openrouter) probed live: step_finish.cost is a sane per-step
+        // DELTA, so the accumulated figure is real. Subscription paths (other
+        // providers/packages, some with documented $0.00 bugs) are unprobed.
+        return mode === "gateway" ? "metered_reported" : "unavailable";
+    }
     if (harness === "pi")
         return "metered_reported"; // pi computes real per-turn cost client-side, every mode
     return "unavailable";
@@ -92,7 +129,9 @@ export function resolveAuth(spec, adapter, config) {
     if (!adapter.capabilities.auth_modes.includes(mode)) {
         const hint = adapter.name === "pi" && mode === "api_key"
             ? " (pi resolves credentials per provider from its own auth.json; CLI args leak via process listings - use subscription or --gateway)"
-            : "";
+            : adapter.name === "opencode" && mode === "api_key"
+                ? " (opencode picks the credential env var per --model's provider prefix; mc's one-var-per-harness model cannot express that safely - use subscription or --gateway openrouter)"
+                : "";
         throw new PreflightError(`harness "${adapter.name}" does not support auth mode "${mode}"${hint}`);
     }
     // kimi-code gets its model injected via KIMI_MODEL_NAME into a scratch home
@@ -126,6 +165,8 @@ export function resolveAuth(spec, adapter, config) {
         }
         if (adapter.name === "pi")
             piSubscriptionModelCheck(spec);
+        if (adapter.name === "opencode")
+            opencodeSubscriptionModelCheck(spec);
         const credential = adapter.name === "claude-code" && process.env.CLAUDE_CODE_OAUTH_TOKEN
             ? { envVar: "CLAUDE_CODE_OAUTH_TOKEN", value: process.env.CLAUDE_CODE_OAUTH_TOKEN }
             : undefined;
@@ -148,6 +189,9 @@ export function resolveAuth(spec, adapter, config) {
         throw new PreflightError(`--gateway requires a gateway name`);
     if (adapter.name === "pi" && name !== "openrouter") {
         throw new PreflightError(`pi gateway support is limited to "openrouter" in v0 (pi routes via its builtin openrouter provider; custom base URLs need pi-side provider config)`);
+    }
+    if (adapter.name === "opencode" && name !== "openrouter") {
+        throw new PreflightError(`opencode gateway support is limited to "openrouter" in v0 (its builtin openrouter provider is used directly; a custom gateway would need a synthesized opencode.json custom-provider block, not yet implemented)`);
     }
     const gatewayCfg = config.gateways[name];
     if (!gatewayCfg) {
