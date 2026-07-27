@@ -992,7 +992,7 @@ describe("mission-control e2e (stub harness)", () => {
   }
 
   test("notify hook that never reads stdin does not crash a read command (EPIPE)", async () => {
-    const { insertRun, getRun } = await import("../src/core/db.ts");
+    const { insertRun, getRun, updateRun } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
     const configPath = join(home, "config.toml");
     const original = readFileSync(configPath, "utf8");
@@ -1025,14 +1025,69 @@ describe("mission-control e2e (stub harness)", () => {
       assert.equal(show.status, 0, show.stderr);
       assert.ok(show.stdout.includes(id), show.stdout);
 
-      assert.equal(getRun(id)!.notified, true); // hook exited 0: delivered
+      // Exit 0 alone does not mean delivered: this hook never drained the
+      // oversized payload, so the write failed (EPIPE) partway through. The
+      // stdin error is captured as a delivery fact, not just swallowed - see
+      // the dedicated truncated-read test below for the full assertion.
+      assert.equal(getRun(id)!.notified, false);
     } finally {
       writeFileSync(configPath, original);
+      // Cleanup, not part of the assertion: this run is left permanently
+      // undeliverable by design (the fixture hook never drains stdin), and
+      // `mc reap` in later tests iterates every unnotified terminal run - an
+      // unnotified leftover here would make an unrelated test's exec hook
+      // fire an extra, unexpected time.
+      updateRun(id, { notified: true });
+    }
+  });
+
+  test("notify hook that reads only part of stdin then exits 0 is not recorded as delivered", async () => {
+    const { insertRun, getRun, eventsAfter, updateRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    const counterPath = join(home, "truncated-counter.txt");
+
+    const id = "trunc01";
+    // Same oversized-title mechanism as the EPIPE non-crash test above: the
+    // write can't complete in one syscall, so a hook that stops reading
+    // early truncates a payload that is still in flight rather than one that
+    // already landed whole in the kernel pipe buffer.
+    insertRun(placeholderRun(id, { title: "x".repeat(300_000), notified: false }) as never);
+
+    try {
+      // Reads only the first 10 bytes of the payload, discards the rest,
+      // then exits 0. A naive "delivered = exit code === 0" read would call
+      // this delivered; the payload never fully arrived at the hook.
+      writeFileSync(configPath, `[notify]\nexec = "head -c 10 >/dev/null; printf x >> ${counterPath}; exit 0"\n`);
+
+      const first = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(first.status, 0, first.stderr); // truncated read must not crash either
+      assert.equal(readFileSync(counterPath, "utf8"), "x");
+
+      assert.equal(getRun(id)!.notified, false); // truncated stdin: NOT delivered, despite exit 0
+
+      const notify = eventsAfter(id, 0)
+        .filter((e: any) => e.kind === "notify_result")
+        .at(-1);
+      assert.ok(notify, "notify_result event missing");
+      assert.equal((notify!.payload as any).channels.exec.delivered, false);
+
+      // SPEC's no-poll contract: a later `mc reap` must retry, not skip.
+      const second = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(second.status, 0, second.stderr);
+      assert.equal(readFileSync(counterPath, "utf8"), "xx"); // hook invoked again
+      assert.equal(getRun(id)!.notified, false);
+    } finally {
+      writeFileSync(configPath, original);
+      // Cleanup, not part of the assertion: see the comment in the EPIPE
+      // test above - this run is left permanently undeliverable by design.
+      updateRun(id, { notified: true });
     }
   });
 
   test("failing exec hook leaves notified false; a later mc reap retries delivery", async () => {
-    const { insertRun, getRun } = await import("../src/core/db.ts");
+    const { insertRun, getRun, updateRun } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
     const configPath = join(home, "config.toml");
     const original = readFileSync(configPath, "utf8");
@@ -1060,6 +1115,9 @@ describe("mission-control e2e (stub harness)", () => {
       assert.equal(getRun(id)!.notified, false);
     } finally {
       writeFileSync(configPath, original);
+      // Cleanup, not part of the assertion: see the comment in the EPIPE
+      // test above - this run is left permanently undeliverable by design.
+      updateRun(id, { notified: true });
     }
   });
 
