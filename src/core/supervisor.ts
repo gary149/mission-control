@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -36,6 +36,21 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   } catch {
     /* group already gone */
   }
+}
+
+/**
+ * The harness pid's process start time, captured once right here at spawn.
+ * `ps -o lstart=` is a fixed-width, per-process-instance timestamp available
+ * on both darwin and linux with no extra dependencies - it's what `mc kill`
+ * later compares against (see cli.ts's matching `pidStart`) before trusting
+ * that a `lost` run's recorded pid still refers to THIS run's harness and
+ * not an unrelated process, or a different concurrent run of the same
+ * harness binary, that has since reused the same pid number.
+ */
+function pidStart(pid: number): string | null {
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+  const out = result.stdout.trim();
+  return out || null;
 }
 
 /**
@@ -89,7 +104,15 @@ export async function supervise(runId: string): Promise<void> {
   });
 
   updateRun(runId, { exit: "running", pid: child.pid ?? null, supervisor_pid: process.pid });
-  insertEvent(runId, "status_change", { exit: "running", pid: child.pid, supervisor_pid: process.pid });
+  insertEvent(runId, "status_change", {
+    exit: "running",
+    pid: child.pid,
+    supervisor_pid: process.pid,
+    // Recorded once, here, at the moment this pid is uniquely THIS
+    // process (see pidStart above) - the identity anchor `mc kill` needs
+    // once the run goes `lost` and nobody's watching it anymore.
+    pid_start: child.pid ? pidStart(child.pid) : null,
+  });
 
   let killedByCap: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;

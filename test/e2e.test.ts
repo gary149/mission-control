@@ -47,6 +47,11 @@ function pidAlive(pid: number | null | undefined): boolean {
   }
 }
 
+/** Mirrors supervisor.ts/cli.ts's pidStart (not exported); used to fabricate a matching (or deliberately mismatched) `pid_start`. */
+function psLstart(pid: number): string {
+  return spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+}
+
 /**
  * Run `mc <args>` asynchronously (not spawnSync). When a test is itself the
  * parent of a fabricated orphan process (see the "lost-but-alive" kill test),
@@ -1024,19 +1029,14 @@ describe("mission-control e2e (stub harness)", () => {
   });
 
   test("mc kill: a lost-but-alive run (dead supervisor, live harness) is now killable", async () => {
-    const { insertRun, eventsAfter } = await import("../src/core/db.ts");
+    const { insertRun, insertEvent, eventsAfter } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
 
     // Fabricate exactly the case the old hard `exit === "running"` guard could
     // never reach: a dead supervisor (no watcher pid alive) with a real, live,
-    // detached (process-group-leader) harness still running unwatched. The
-    // workdir is embedded in the process's own argv so the ownership check
-    // (added for the PID-reuse P1) recognizes it as legitimately owned -
-    // exactly what a real harness spawned with `cwd: run.workdir` looks like
-    // to `ps -o command=`, minus the workdir actually appearing in argv for
-    // this inline `-e` stand-in, so we fake that one detail explicitly.
+    // detached (process-group-leader) harness still running unwatched.
     const workdir = join(home, "lost-none");
-    const orphan = spawn(process.execPath, ["-e", `/* mc-test-workdir:${workdir} */ setInterval(() => {}, 1000)`], {
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       detached: true,
       stdio: "ignore",
     });
@@ -1054,6 +1054,12 @@ describe("mission-control e2e (stub harness)", () => {
       pid: orphan.pid, supervisor_pid: 999_999_998, stderr_path: join(home, "lost-none.log"),
       artifacts: [], verify_evidence: null, notified: false,
     } as never);
+    // The ownership check (start-time identity) needs a recorded `pid_start`
+    // to compare against - this is what supervisor.ts writes at real spawn
+    // time; fabricate the same event here since this row bypassed supervise().
+    insertEvent(id, "status_change", {
+      exit: "running", pid: orphan.pid, supervisor_pid: 999_999_998, pid_start: psLstart(orphan.pid!),
+    });
 
     assert.ok(pidAlive(orphan.pid), "sanity: orphan must be alive before mc kill runs");
 
@@ -1076,13 +1082,14 @@ describe("mission-control e2e (stub harness)", () => {
   });
 
   test("mc kill: refuses a lost run whose pid now belongs to an unrelated process (possible PID reuse)", async () => {
-    const { insertRun, eventsAfter } = await import("../src/core/db.ts");
+    const { insertRun, insertEvent, eventsAfter } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
 
     // A real, live process standing in for "the recorded pid got reused by
-    // something else" - its command line references neither a harness
-    // binary nor this run's workdir, so the ownership check must refuse it
-    // rather than signal a stranger.
+    // something else" (or by a different concurrent run of the SAME harness
+    // binary - a command-line match alone couldn't tell those apart, which
+    // is exactly why the ownership check is start-time identity, not a
+    // command-line substring match).
     const stranger = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       detached: true,
       stdio: "ignore",
@@ -1101,13 +1108,22 @@ describe("mission-control e2e (stub harness)", () => {
       pid: stranger.pid, supervisor_pid: 999_999_994, stderr_path: join(home, "reuse-none.log"),
       artifacts: [], verify_evidence: null, notified: false,
     } as never);
+    // The recorded start time is from "the original harness" this pid used
+    // to belong to - deliberately NOT the stand-in process's real start
+    // time, simulating the pid having been reused since.
+    insertEvent(id, "status_change", {
+      exit: "running", pid: stranger.pid, supervisor_pid: 999_999_994,
+      pid_start: "Thu Jan  1 00:00:00 1970",
+    });
 
     try {
       assert.ok(pidAlive(stranger.pid), "sanity: the stand-in process must be alive before mc kill runs");
+      assert.notEqual(psLstart(stranger.pid!), "Thu Jan  1 00:00:00 1970", "sanity: the fabricated start time must not coincide with reality");
 
       const res = await runMc(entry, ["kill", id]);
       assert.equal(res.status, 1);
-      assert.ok(res.stderr.includes("possible PID reuse"), res.stderr);
+      assert.ok(res.stderr.includes("start time mismatch"), res.stderr);
+      assert.ok(res.stderr.includes("PID reuse"), res.stderr);
       assert.ok(res.stderr.includes(String(stranger.pid)), res.stderr);
 
       // Refused, not signalled: the unrelated process must be untouched, and
@@ -1119,6 +1135,56 @@ describe("mission-control e2e (stub harness)", () => {
       assert.ok(!killRequested, "kill_requested must not be recorded for a refused PID-reuse kill");
     } finally {
       if (stranger.pid) process.kill(stranger.pid, "SIGKILL");
+    }
+  });
+
+  test("mc kill: bare-pid fallback still escalates to SIGKILL when the group signal is unavailable", async () => {
+    const { insertRun, insertEvent } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // NOT spawned detached: its process-group id is inherited from this test
+    // process (not itself), so `process.kill(-pid, ...)` treating its own
+    // pid as a group id fails with ESRCH and killGroupOrPid must fall back
+    // to a bare-pid signal. It also traps and ignores SIGTERM, so only a
+    // SIGKILL can end it - exactly the regression: escalation polling
+    // groupAlive() unconditionally reads "dead" on the very first ESRCH
+    // check and skips SIGKILL entirely, leaving this alive forever.
+    const stubborn = spawn(
+      process.execPath,
+      ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+      { stdio: "ignore" },
+    );
+    stubborn.unref();
+    await sleep(300);
+    assert.ok(pidAlive(stubborn.pid), "sanity: stubborn process must be alive before mc kill runs");
+
+    const id = "bare0001";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "non-grouped, SIGTERM-ignoring harness", title: "non-grouped harness",
+      spec_path: join(home, "bare-none.json"), workdir: join(home, "bare-none"), session_id: null,
+      exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: stubborn.pid, supervisor_pid: 999_999_993, stderr_path: join(home, "bare-none.log"),
+      artifacts: [], verify_evidence: null, notified: false,
+    } as never);
+    insertEvent(id, "status_change", {
+      exit: "running", pid: stubborn.pid, supervisor_pid: 999_999_993, pid_start: psLstart(stubborn.pid!),
+    });
+
+    try {
+      const res = await runMc(entry, ["kill", id]);
+      assert.equal(res.status, 0, res.stderr);
+
+      // SIGTERM alone never kills it (trapped and ignored) - only a
+      // correctly-escalated bare-pid SIGKILL does.
+      const start = Date.now();
+      while (pidAlive(stubborn.pid) && Date.now() - start < 15000) await sleep(200);
+      assert.equal(pidAlive(stubborn.pid), false, `pid ${stubborn.pid} still alive after mc kill (bare-pid SIGKILL never fired)`);
+    } finally {
+      if (stubborn.pid && pidAlive(stubborn.pid)) process.kill(stubborn.pid, "SIGKILL");
     }
   });
 
