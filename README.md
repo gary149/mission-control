@@ -18,7 +18,7 @@ delegate to.
 ## First run
 
 ```sh
-mc run --harness claude-code --artifact haiku.txt "write a haiku about shipping into haiku.txt"
+mc run --harness claude-code --artifact limerick.txt "write a limerick about shipping on Friday into limerick.txt"
 
 mc ls            # exit + verdict + cost, at a glance
 mc tail <id>     # follow the live event stream
@@ -53,11 +53,12 @@ host, any OpenRouter model runs through any harness:
 
 ```sh
 mc run --harness opencode --gateway openrouter --model moonshotai/kimi-k3 \
-  --budget 2 --artifact app.py "build the thing"
+  --budget 2 --artifact app.py "build the thing"   # --budget 2 = hard cap at $2 of spend
 ```
 
-Where the harness reports real metered cost (`opencode`, `pi`), `--budget` kills the
-run mid-flight the moment spend crosses the cap. Everywhere else use `--max-minutes`.
+Where the harness reports real metered cost (`opencode`, `pi`), `--budget` (USD) kills
+the run mid-flight the moment accumulated spend crosses the cap. Everywhere else use
+`--max-minutes`.
 
 ## Follow-ups
 
