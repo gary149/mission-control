@@ -29,6 +29,14 @@ delegate to.
 
 ## First run
 
+**Ask your agent:**
+
+```text
+Use mission-control: build a playable browser FPS on claude-code with kimi-k3 via openrouter, ping me when verified.
+```
+
+**Or directly:**
+
 ```sh
 # no --model needed: uses your Claude login and its default model
 mc run --harness claude-code --max-minutes 360 --artifact index.html \
