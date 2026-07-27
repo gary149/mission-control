@@ -32,15 +32,26 @@ delegate to.
 ```sh
 mc run --harness claude-code --max-minutes 30 --artifact index.html \
   "build a playable browser FPS in a single index.html: pointer-lock aim, WASD, targets that fall when shot"
-
-mc ls            # exit + verdict + cost, at a glance
-mc tail <id>     # live event stream - tool calls, subagents spinning up, cost ticking
-mc show <id>     # full record + verification evidence
 ```
 
 Yes, really - hand it a half-hour build and close the laptop. Each run executes in an
 isolated workdir, and `verified` means mc mechanically checked the declared artifact
 exists with real content - not that the agent claimed success.
+
+## Commands
+
+```sh
+mc ls                        # every run: exit + verdict + cost, at a glance
+mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
+mc show <id>                 # full record + verification evidence
+mc resume <id> "add tests"   # continue the session, new linked run, same workdir
+mc resume <id> --fresh --at <sha> "…"   # restart clean from a git checkpoint
+mc kill <id>
+mc reap                      # cron-safe sweep: lost runs + pending notifications
+mc harness ls                # adapters, capabilities, which auth is ready here
+mc harness check opencode --gateway openrouter --model moonshotai/kimi-k3
+                             # prove an adapter end-to-end against the real CLI
+```
 
 ## Harnesses
 
@@ -51,11 +62,6 @@ exists with real content - not that the agent claimed success.
 | <img src="docs/icons/kimi.svg" width="18"> | `kimi-code` | Kimi Code | `MOONSHOT_API_KEY` &middot; OpenRouter | |
 | <img src="docs/icons/opencode.svg" width="18"> | `opencode` | opencode | `opencode auth login` &middot; OpenRouter | ✓ |
 | <img src="docs/icons/pi.svg" width="18"> | `pi` | pi | pi login &middot; OpenRouter | ✓ |
-
-```sh
-mc harness ls              # what's installed here + which auth is ready
-mc harness check opencode  # prove an adapter end-to-end against the real CLI
-```
 
 Every adapter is grounded in a live probe of the real CLI and validated end-to-end:
 launch, event parsing, session capture, native resume.
@@ -73,14 +79,6 @@ mc run --harness opencode --gateway openrouter --model moonshotai/kimi-k3 \
 Where the harness reports real metered cost (`opencode`, `pi`), `--budget` (USD) kills
 the run mid-flight the moment accumulated spend crosses the cap. Everywhere else use
 `--max-minutes`.
-
-## Follow-ups
-
-```sh
-mc resume <id> "also add tests"        # continue the same session, same workdir
-mc resume <id> --fresh --at <sha> "…"  # restart clean from a git checkpoint,
-                                       # for escaping stuck sessions
-```
 
 ## Notifications
 
