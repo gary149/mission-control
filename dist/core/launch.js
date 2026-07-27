@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
@@ -72,10 +72,23 @@ export function launch(spec, options = {}) {
     else {
         ({ workdir, isGit } = createWorkdir(id, spec.cwd));
     }
+    // HEAD at launch anchors the commit-aware git_effect check: work an agent
+    // COMMITS (leaving a clean tree) must still count as an effect.
+    let gitHeadAtLaunch = null;
+    if (isGit) {
+        const head = spawnSync("git", ["-C", workdir, "rev-parse", "HEAD"], { encoding: "utf8" });
+        gitHeadAtLaunch = head.status === 0 ? head.stdout.trim() : null; // null: unborn branch, porcelain-only
+    }
     const dir = runDir(id);
     mkdirSync(dir, { recursive: true });
     const specPath = join(dir, "spec.json");
-    writeFileSync(specPath, JSON.stringify({ ...spec, is_git: isGit, bin: detection.path, resume_session_id: parent?.session_id ?? undefined }, null, 2));
+    writeFileSync(specPath, JSON.stringify({
+        ...spec,
+        is_git: isGit,
+        bin: detection.path,
+        resume_session_id: parent?.session_id ?? undefined,
+        git_head_at_launch: gitHeadAtLaunch ?? undefined,
+    }, null, 2));
     const run = {
         id,
         parent_run_id: parent?.id ?? null,

@@ -115,8 +115,17 @@ export const codex = {
                         payload: { name: "file_change", input: JSON.stringify(item.changes ?? []).slice(0, 2000) },
                     });
                 }
-                else if (item.type === "reasoning") {
+                else if (item.type === "reasoning" || item.type === "todo_list") {
                     break; // benign
+                }
+                else if (item.type === "error") {
+                    // codex reports warnings/errors as items (e.g. "Model metadata for
+                    // `x` not found") - cleanly parsed, so it must not poison parser
+                    // health; surfaced as harness-error for the event stream.
+                    events.push({
+                        kind: "error",
+                        payload: { note: "harness-error", message: String(item.message ?? "").slice(0, 500) },
+                    });
                 }
                 else {
                     events.push({ kind: "error", payload: { note: "unknown-native-event", raw: line.slice(0, 2000) } });

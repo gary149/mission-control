@@ -91,6 +91,16 @@ export const claudeCode = {
         // own upstream-retry notices (observed live on OpenRouter/kimi runs).
         const BENIGN_SYSTEM = /^(hook_|thinking_tokens$|api_retry$)/;
         switch (obj?.type) {
+            // Benign subagent/background progress noise, deliberately skipped
+            // (observed at 15k+ events per long run on live fleet usage; filing
+            // these as errors made `verified` unreachable for busy runs):
+            case "task_progress":
+            case "tool_progress":
+            case "task_notification":
+            case "task_started":
+            case "task_updated":
+            case "background_tasks_changed":
+                break;
             case "system":
                 if (obj.subtype === "init") {
                     events.push({ kind: "started", payload: { session_id: obj.session_id, model: obj.model } });

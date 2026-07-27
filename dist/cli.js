@@ -441,11 +441,15 @@ export async function cliMain(argv) {
             }
             case "resume": {
                 const parent = requireRun(args[0]);
-                // Inherit harness/model/auth from the parent's archived spec; new prompt.
+                // A continuation inherits everything verification-relevant from the
+                // parent's archived spec - harness/model/auth AND artifacts/visual/
+                // caps - unless explicitly overridden. Silently dropping the parent's
+                // declared checks was how continuation runs lost their verifiability
+                // (fleet evidence: every artifact-less resume capped below verified).
                 const parentStored = JSON.parse(readFileSync(parent.spec_path, "utf8"));
-                let maxMinutes = null;
-                let budget = null;
-                let visual = false;
+                let maxMinutes;
+                let budget;
+                let visual;
                 const artifacts = [];
                 const positional = [];
                 for (let i = 1; i < args.length; i++) {
@@ -456,22 +460,31 @@ export async function cliMain(argv) {
                             fail(`${arg} requires a value`);
                         return value;
                     };
+                    const nextPositive = () => {
+                        const value = Number(next());
+                        if (!Number.isFinite(value) || value <= 0)
+                            fail(`${arg} must be a finite positive number`);
+                        return value;
+                    };
                     switch (arg) {
                         case "--artifact":
                             artifacts.push(next());
                             break;
                         case "--max-minutes":
-                            maxMinutes = Number(next());
+                            maxMinutes = nextPositive();
                             break;
                         case "--budget":
-                            budget = Number(next());
+                            budget = nextPositive();
                             break;
                         case "--visual":
                             visual = true;
                             break;
+                        case "--no-visual":
+                            visual = false;
+                            break;
                         default:
                             if (arg.startsWith("--"))
-                                fail(`unknown flag ${arg} (resume inherits harness/model/auth from the parent)`);
+                                fail(`unknown flag ${arg} (resume inherits spec fields from the parent)`);
                             positional.push(arg);
                     }
                 }
@@ -483,10 +496,10 @@ export async function cliMain(argv) {
                     model: parent.model,
                     prompt,
                     cwd: null,
-                    artifacts,
-                    visual,
-                    budget_usd: budget,
-                    max_minutes: maxMinutes,
+                    artifacts: artifacts.length > 0 ? artifacts : (parentStored.artifacts ?? []),
+                    visual: visual ?? Boolean(parentStored.visual),
+                    budget_usd: budget !== undefined ? budget : (parentStored.budget_usd ?? null),
+                    max_minutes: maxMinutes !== undefined ? maxMinutes : (parentStored.max_minutes ?? null),
                     auth: parentStored.auth ?? { mode: "subscription" },
                 }, { parent });
                 console.log(`${run.id}  ${run.title}`);

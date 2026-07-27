@@ -8,6 +8,7 @@ export const EVENT_KINDS = [
     "artifact",
     "status_change",
     "verify_result",
+    "notify_result",
     "error",
     "exited",
 ];
