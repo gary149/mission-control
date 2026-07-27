@@ -44,13 +44,16 @@ emit({ type: "system", subtype: "init", session_id: "fake-session-123", model: "
 emit({ type: "system", subtype: "hook_started", hook_name: "SessionStart" });
 emit({ type: "system", subtype: "thinking_tokens", tokens: 42 });
 emit({ type: "system", subtype: "api_retry", attempt: 1 });
-// Subagent/background progress noise (observed 15k+ per long run on live fleet):
-emit({ type: "task_progress", task_id: "t1", progress: 0.5 });
-emit({ type: "tool_progress", tool_use_id: "tu1", elapsed_ms: 1200 });
-emit({ type: "task_started", task_id: "t1" });
-emit({ type: "task_notification", task_id: "t1", message: "working" });
-emit({ type: "task_updated", task_id: "t1" });
-emit({ type: "background_tasks_changed", tasks: [] });
+// Subagent/background-task lifecycle - system SUBTYPES captured VERBATIM from
+// claude-code 2.1.220 (live run 58f449 on the openclaw host, 2026-07-27). An
+// earlier version of this fixture faked these as top-level types transcribed
+// from an analysis report instead of a real stream, which let dead adapter
+// cases pass green while real runs filed them as errors - keep these verbatim.
+emit({ type: "system", subtype: "task_started", task_id: "bc8l380mx", tool_use_id: "Bash_22", description: "Probe candidate fire data and basemap endpoints", task_type: "local_bash", uuid: "de9cd286-48cf-4303-8742-4f704501d30a", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
+emit({ type: "system", subtype: "task_progress", task_id: "wtga1fo90", tool_use_id: "Workflow_24", description: "Research fire data sources, build 3D frontend and FastAPI backend in parallel", usage: { total_tokens: 0, tool_uses: 0, duration_ms: 76 }, summary: "Research fire data sources, build 3D frontend and FastAPI backend in parallel", workflow_progress: [{ type: "workflow_phase", index: 1, title: "Recherche" }, { type: "workflow_phase", index: 2, title: "Frontend" }, { type: "workflow_phase", index: 3, title: "Backend" }], uuid: "090859b5-3acc-44d8-8a64-c5c083e00001", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
+emit({ type: "system", subtype: "task_updated", task_id: "btfgjqgv2", patch: { status: "failed", end_time: 1785150239528 }, uuid: "b8757d4b-d042-4879-bd67-07990bfc0955", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
+emit({ type: "system", subtype: "task_notification", task_id: "bc8l380mx", tool_use_id: "Bash_22", status: "completed", output_file: "", summary: "Probe candidate fire data and basemap endpoints", uuid: "8066f7b8-7714-428d-9e69-acce8805377d", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
+emit({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "wtga1fo90", task_type: "local_workflow", description: "Research fire data sources, build 3D frontend and FastAPI backend in parallel" }], uuid: "71c1eba0-7ab4-487b-b33d-a617a8c53ce1", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
 emit({ type: "assistant", message: { content: [{ type: "thinking", thinking: "..." }] } });
 emit({ type: "assistant", message: { content: [{ type: "text", text: "Working on it." }] } });
 emit({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: "out.txt" } }] } });

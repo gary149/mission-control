@@ -84,10 +84,26 @@ describe("mission-control e2e (stub harness)", () => {
     assert.ok(existsSync(join(done.workdir, "out.txt")));
 
     // Event stream has the normalized shape.
-    const kinds = eventsAfter(run.id, 0).map((e: any) => e.kind);
-    for (const expected of ["started", "text", "tool_call", "cost_update", "verify_result", "notify_result", "exited"]) {
+    const events = eventsAfter(run.id, 0);
+    const kinds = events.map((e: any) => e.kind);
+    for (const expected of ["started", "text", "tool_call", "subagent", "cost_update", "verify_result", "notify_result", "exited"]) {
       assert.ok(kinds.includes(expected), `missing event kind ${expected} in ${kinds}`);
     }
+
+    // Subagent lifecycle (system subtypes) maps to STRUCTURED events, never to
+    // errors: the run stayed `verified` above (parser health un-poisoned), and
+    // the payloads carry the ids/descriptions an orchestrator renders from.
+    const subagent = events.filter((e: any) => e.kind === "subagent").map((e: any) => e.payload as any);
+    assert.equal(subagent.length, 5);
+    assert.deepEqual(
+      subagent.map((p) => p.phase),
+      ["task_started", "task_progress", "task_updated", "task_notification", "background_tasks_changed"],
+    );
+    assert.equal(subagent[0].task_id, "bc8l380mx");
+    assert.equal(subagent[0].description, "Probe candidate fire data and basemap endpoints");
+    assert.equal(subagent[2].status, "failed"); // task_updated carries patch.status
+    assert.equal(subagent[3].status, "completed");
+    assert.equal(subagent[4].tasks[0].task_id, "wtga1fo90");
 
     // Notification fired with both axes and no credential plumbing.
     const payload = JSON.parse(readFileSync(join(home, "notified.json"), "utf8"));
