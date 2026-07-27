@@ -18,7 +18,7 @@ Install mission-control on this machine:
 npm install -g https://github.com/gary149/mission-control/archive/refs/heads/main.tar.gz
 ```
 
-**Or by hand:**
+**Or directly:**
 
 ```sh
 npm install -g https://github.com/gary149/mission-control/archive/refs/heads/main.tar.gz
@@ -41,6 +41,8 @@ exists with real content - not that the agent claimed success.
 ## Commands
 
 ```sh
+mc run --harness H [--model M] [--gateway openrouter] [--budget 2] \
+       [--max-minutes 30] [--artifact PATH] [--visual] "task"
 mc ls                        # every run: exit + verdict + cost, at a glance
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
 mc show <id>                 # full record + verification evidence
@@ -51,6 +53,7 @@ mc reap                      # cron-safe sweep: lost runs + pending notification
 mc harness ls                # adapters, capabilities, which auth is ready here
 mc harness check opencode --gateway openrouter --model moonshotai/kimi-k3
                              # prove an adapter end-to-end against the real CLI
+mc help                      # every command and flag
 ```
 
 ## Harnesses
