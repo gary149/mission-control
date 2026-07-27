@@ -1,6 +1,6 @@
-# mission-control
+# Mission Control
 
-![mission-control](docs/hero.jpg)
+![Mission Control](docs/hero.jpg)
 
 **Fire a coding agent at a task. Walk away. You - or the orchestrator that sent it - gets pinged with a verified result.**
 
