@@ -3,14 +3,19 @@
  * Stub codex for the conformance suite. Emits the exec --json JSONL shape
  * captured VERBATIM from codex-cli 0.144.6 on 2026-07-22 (see the adapter's
  * doc comment). Prompt directives (env is stripped by design): FAIL, DUMPENV:<p>,
- * MCPTOOLS (emit mcp_tool_call/web_search items - real codex SDK item types
+ * MCPTOOLS (emit an mcp_tool_call/web_search item pair in the REAL codex
+ * ThreadItem shape - separate `server`/`tool` fields, `result` as a
+ * structured McpToolCallResult object, not a string - real item types
  * confirmed against the installed @openai/codex 0.145.0 binary's item-type
  * enum, previously unmapped and parser-health-poisoning), MKDIRARTIFACT
- * (mkdir the declared out.txt path instead of writing a file to it).
+ * (mkdir the declared out.txt path instead of writing a file to it),
+ * TRAPSIGTERM (ignore `mc kill`'s SIGTERM, finish normally, exit 0 anyway -
+ * classification must still land `killed`).
  * When invoked as `exec resume <id> <prompt>`, appends to the target file to
  * simulate native session continuation.
  */
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const args = process.argv.slice(2);
 
@@ -30,6 +35,26 @@ const emit = (obj) => console.log(JSON.stringify(obj));
 const threadId = resumeId ?? "fake-thread-0001";
 
 emit({ type: "thread.started", thread_id: threadId });
+
+if (prompt.includes("TRAPSIGTERM")) {
+  // Simulates a harness that traps/ignores `mc kill`'s SIGTERM and finishes
+  // "normally" anyway - the run must still be classified `killed`, because
+  // the kill was requested regardless of what the child does afterward.
+  let signaled = false;
+  process.on("SIGTERM", () => {
+    signaled = true;
+  });
+  while (!signaled) {
+    await sleep(50);
+  }
+  writeFileSync("out.txt", "deliverable content\n");
+  emit({
+    type: "turn.completed",
+    usage: { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5, reasoning_output_tokens: 0 },
+  });
+  process.exit(0);
+}
+
 emit({ type: "turn.started" });
 emit({ type: "item.completed", item: { id: "item_0", type: "agent_message", text: "On it." } });
 emit({
@@ -46,9 +71,19 @@ emit({ type: "item.completed", item: { id: "item_w", type: "error", message: "Mo
 emit({ type: "item.completed", item: { id: "item_t", type: "todo_list", items: [{ text: "step", completed: true }] } });
 
 if (prompt.includes("MCPTOOLS")) {
+  // REAL ThreadItem shape: `server` and `tool` are separate fields (the tool
+  // NAME is `tool`, not `server`), and `result` is a structured
+  // McpToolCallResult object, never a plain string.
   emit({
     type: "item.completed",
-    item: { id: "item_m", type: "mcp_tool_call", server: "fake-server", tool_name: "fake_tool", arguments: { q: "x" }, output: "tool ok" },
+    item: {
+      id: "item_m",
+      type: "mcp_tool_call",
+      server: "fake-server",
+      tool: "fake_tool",
+      arguments: { q: "x" },
+      result: { content: [{ type: "text", text: "tool ok" }], isError: false },
+    },
   });
   emit({
     type: "item.completed",

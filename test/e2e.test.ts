@@ -955,9 +955,9 @@ describe("mission-control e2e (stub harness)", () => {
     assert.ok(health.passed, "cleanly parsed harness errors must not poison parser health");
   });
 
-  test("codex: mcp_tool_call and web_search items don't poison parser health", async () => {
+  test("codex: mcp_tool_call and web_search items don't poison parser health, and the tool name/result are captured", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     // Real codex exec-item types (confirmed against the installed codex-cli
     // 0.145.0 binary's item-type enum) that previously had no branch and fell
@@ -971,6 +971,56 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(done.verdict, "verified");
     const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
     assert.ok(health.passed, "mcp_tool_call/web_search items must not poison parser health");
+
+    // The ThreadItem binding carries `server` and `tool` as separate fields -
+    // the tool_call event must be keyed on `tool` (the actual tool name), not
+    // fall back to `server` and lose which tool ran.
+    const events = eventsAfter(run.id, 0);
+    const toolCalls = events.filter((e: any) => e.kind === "tool_call").map((e: any) => e.payload as any);
+    const mcpCall = toolCalls.find((p) => p.name === "fake_tool");
+    assert.ok(mcpCall, `mcp_tool_call must be captured under item.tool, got names: ${toolCalls.map((p) => p.name)}`);
+    const webSearchCall = toolCalls.find((p) => p.name === "web_search");
+    assert.ok(webSearchCall, "web_search tool_call missing");
+
+    // result is a structured McpToolCallResult object, not a string - the
+    // excerpt must be a readable serialization, never "[object Object]". The
+    // fixture also emits a command_execution tool_result ("hi\n"), so check
+    // across all tool_result excerpts rather than assuming stream order.
+    const excerpts = events
+      .filter((e: any) => e.kind === "tool_result")
+      .map((e: any) => String((e.payload as any).excerpt));
+    assert.ok(!excerpts.some((x) => x.includes("[object Object]")), `excerpt collapsed to [object Object]: ${excerpts}`);
+    assert.ok(excerpts.some((x) => x.includes("tool ok")), `missing mcp_tool_call result excerpt, got: ${excerpts}`);
+  });
+
+  test("mc kill: a harness that traps SIGTERM and exits 0 anyway still lands `killed`, not `succeeded`", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const run = launch(
+      baseSpec({ harness: "codex", prompt: "hang until killed TRAPSIGTERM", auth: { mode: "api_key" } }) as never,
+    );
+
+    // `mc kill` requires exit === "running" with a pid recorded - wait for the
+    // supervisor to actually spawn the child.
+    const start = Date.now();
+    let running = getRun(run.id)!;
+    while (running.exit !== "running" || !running.pid) {
+      if (Date.now() - start > 10000) throw new Error(`run never reached running: ${JSON.stringify(running)}`);
+      await sleep(100);
+      running = getRun(run.id)!;
+    }
+
+    const res = spawnSync(process.execPath, [entry, "kill", run.id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(res.status, 0, res.stderr);
+
+    const done = await waitTerminal(() => getRun(run.id));
+    // The fixture traps SIGTERM, finishes its turn, and exits 0 - the old
+    // exitCode-only (plus signal-only) classification would call this
+    // `succeeded`, since neither exitCode nor a raw kill signal fired.
+    assert.equal(done.exit, "killed");
+    assert.notEqual(done.exit, "succeeded");
   });
 
   test("CLI resume inherits artifacts/visual/caps from the parent; flags override", async () => {
