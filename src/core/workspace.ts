@@ -13,6 +13,8 @@ function forbiddenRoots(): string[] {
     join(home, ".codex"),
     join(home, ".kimi-code"),
     join(home, ".kimi"), // legacy kimi-cli data root
+    join(home, ".local", "share", "opencode"), // auth.json + session sqlite db
+    join(home, ".config", "opencode"), // opencode.json, agents/commands
     join(home, ".pi"),
     join(home, ".openclaw"),
     join(home, ".mission-control"),
