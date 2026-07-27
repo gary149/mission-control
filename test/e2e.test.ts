@@ -161,9 +161,10 @@ describe("mission-control e2e (stub harness)", () => {
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
     const help = spawnSync(process.execPath, [entry, "help"], { encoding: "utf8", env: { ...process.env } }).stdout;
     for (const expected of [
-      "run", "ls", "show", "tail", "kill", "harness ls",
-      "--harness", "--model", "--cwd", "--artifact", "--visual",
+      "run", "ls", "show", "tail", "kill", "harness ls", "resume", "reap",
+      "--harness", "--model", "--cwd", "--artifact", "--visual", "--no-visual",
       "--max-minutes", "--budget", "--gateway", "--api-key", "--spec",
+      "--fresh", "--at SHA",
       "subscription", "MC_HOME", "config.toml",
     ]) {
       assert.ok(help.includes(expected), `help is missing "${expected}"`);
