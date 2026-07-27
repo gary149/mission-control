@@ -1052,7 +1052,11 @@ describe("mission-control e2e (stub harness)", () => {
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: orphan.pid, supervisor_pid: 999_999_998, stderr_path: join(home, "lost-none.log"),
-      artifacts: [], verify_evidence: null, notified: false,
+      // notified: true - a lost run that's been DETECTED (which fabricating
+      // exit: "lost" directly simulates) would already have had its
+      // notification delivered by the reap that marked it lost; leaving this
+      // false would make an unrelated `mc reap` sweep it and double-fire hooks.
+      artifacts: [], verify_evidence: null, notified: true,
     } as never);
     // The ownership check (start-time identity) needs a recorded `pid_start`
     // to compare against - this is what supervisor.ts writes at real spawn
@@ -1106,7 +1110,7 @@ describe("mission-control e2e (stub harness)", () => {
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: stranger.pid, supervisor_pid: 999_999_994, stderr_path: join(home, "reuse-none.log"),
-      artifacts: [], verify_evidence: null, notified: false,
+      artifacts: [], verify_evidence: null, notified: true,
     } as never);
     // The recorded start time is from "the original harness" this pid used
     // to belong to - deliberately NOT the stand-in process's real start
@@ -1168,7 +1172,7 @@ describe("mission-control e2e (stub harness)", () => {
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: stubborn.pid, supervisor_pid: 999_999_993, stderr_path: join(home, "bare-none.log"),
-      artifacts: [], verify_evidence: null, notified: false,
+      artifacts: [], verify_evidence: null, notified: true,
     } as never);
     insertEvent(id, "status_change", {
       exit: "running", pid: stubborn.pid, supervisor_pid: 999_999_993, pid_start: psLstart(stubborn.pid!),
@@ -1201,7 +1205,7 @@ describe("mission-control e2e (stub harness)", () => {
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: 999_999_997, supervisor_pid: 999_999_996, stderr_path: join(home, "dead-none.log"),
-      artifacts: [], verify_evidence: null, notified: false,
+      artifacts: [], verify_evidence: null, notified: true,
     } as never);
     assert.ok(!pidAlive(999_999_997), "sanity: this pid must not actually exist");
 
