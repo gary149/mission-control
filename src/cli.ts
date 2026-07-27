@@ -239,7 +239,9 @@ async function harnessCheck(args: string[]): Promise<void> {
     ? readFileSync(join(done.workdir, "mc-check.txt"), "utf8")
     : "";
   report("artifact content exact", content.trim() === marker, content.trim().slice(0, 60));
-  report("tokens extracted", done.tokens_out != null && done.tokens_out > 0, `out=${done.tokens_out}`);
+  if (adapter.capabilities.tokens_reporting === "reported") {
+    report("tokens extracted", done.tokens_out != null && done.tokens_out > 0, `out=${done.tokens_out}`);
+  }
   if (adapter.capabilities.cost_reporting === "per_run" && done.cost_basis === "metered_reported") {
     report("cost extracted (declared per_run + metered)", done.cost_usd != null, `$${done.cost_usd}`);
   }
@@ -532,7 +534,9 @@ export async function cliMain(argv: string[]): Promise<void> {
             let probe: string;
             try {
               const spec: RunSpec = {
-                harness: adapter.name, model: mode === "gateway" ? "probe/probe" : null, prompt: "probe",
+                // kimi-code requires a model in every mode; give the probe one so
+                // it reports credential readiness, not the model requirement.
+                harness: adapter.name, model: mode === "gateway" || adapter.name === "kimi-code" ? "probe/probe" : null, prompt: "probe",
                 cwd: null, artifacts: [], visual: false, budget_usd: null, max_minutes: null,
                 auth: mode === "gateway" ? { mode, gateway: "openrouter" } : { mode },
               };

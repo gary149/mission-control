@@ -15,6 +15,7 @@ export const claudeCode: HarnessAdapter = {
     resume: "native",
     steering: "none",
     cost_reporting: "per_run",
+    tokens_reporting: "reported",
     effort_passthrough: "stripped_for_non_anthropic",
     sandbox: "flag",
     auth_modes: ["subscription", "api_key", "gateway"],

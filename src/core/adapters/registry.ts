@@ -2,10 +2,11 @@ import { PreflightError } from "../types.ts";
 import type { HarnessAdapter } from "./types.ts";
 import { claudeCode } from "./claude-code.ts";
 import { codex } from "./codex.ts";
+import { kimiCode } from "./kimi-code.ts";
 import { pi } from "./pi.ts";
 
 /** Static compile-time registry; no dynamic plugin loading (SPEC decision). */
-export const ADAPTERS: HarnessAdapter[] = [claudeCode, codex, pi];
+export const ADAPTERS: HarnessAdapter[] = [claudeCode, codex, kimiCode, pi];
 
 export function getAdapter(name: string): HarnessAdapter {
   const adapter = ADAPTERS.find((a) => a.name === name);
