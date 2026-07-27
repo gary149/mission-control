@@ -20,6 +20,8 @@ export interface RunSpec {
   visual: boolean;
   budget_usd: number | null;
   max_minutes: number | null;
+  /** Stall cap: kill when the harness emits nothing for this long. null = default (30); 0 = disabled. */
+  max_idle_minutes: number | null;
   auth: { mode: AuthMode; gateway?: string };
 }
 
@@ -45,6 +47,7 @@ export interface Run {
   tokens_out: number | null;
   budget_usd: number | null;
   max_minutes: number | null;
+  max_idle_minutes: number | null;
   auth_mode: AuthMode;
   gateway: string | null;
   pid: number | null;

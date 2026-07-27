@@ -123,6 +123,12 @@ Adapters must map into this union or emit `error`; unknown native events are sto
 under `error` with a parse note, never dropped. This union is deliberately shaped so it
 could become an RPC wire vocabulary later (pi-mono style) without a schema migration.
 
+Failure reasons are first-class: every adapter surfaces harness-reported failures as
+`error` events with note `harness-error` (cleanly parsed, never counted against parser
+health), and when a run exits nonzero having reported nothing on stdout (kimi-code's
+probed failure mode), the supervisor synthesizes the reason from the scrubbed stderr
+tail (note `stderr-tail`) - a silent death still carries its why in the stream.
+
 `subagent` carries internal task/subagent lifecycle as structured data
 (`phase, task_id, description, status`) without violating the one-Run-per-lead-session
 rule (ADR 0001): subagents still never become ledger rows; `mc tail` just gains a live
@@ -440,6 +446,15 @@ from what the adapter happens to emit:
   event, so even in metered mode a dollar cap could never fire mid-run. `--budget` is
   therefore refused for claude-code entirely in v0 (the table's "allowed" waits for an
   incremental cost signal); `--max-minutes` is the enforceable cap.
+- Two independent backstops, both supervisor-owned: `--max-minutes` (wall clock) and
+  `--max-idle-minutes` (stall detection, default 30, 0 disables). The idle signal is
+  RAW stream lines on stdout or stderr, not inserted events - adapters skip benign
+  native noise without inserting anything, so event gaps overstate silence and a retry
+  storm still counts as alive. Grounded in fleet data: healthy runs (including 5-9 hour
+  missions) never exceeded ~12 minutes of stream silence, while real stalls (the
+  b758fe live-locked Agent dispatch: pid alive, CPU spinning, zero sockets) sat at
+  75-128 minutes. Idle kills escalate SIGTERM to SIGKILL - a live-locked event loop
+  never runs its SIGTERM handler.
 - `--max-minutes` is the universal backstop: the supervisor's existing kill-and-notify
   path triggered by wall clock. It's the only cap available for flat-subscription and
   codex runs, and the mitigation for quota-exhausted runs that retry forever.
@@ -489,7 +504,7 @@ The CLI is a surface, not the product. Structure enforces this:
 ### CLI
 
 ```
-mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N]
+mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N] [--max-idle-minutes N]
           [--gateway NAME | --api-key] [--artifact PATH]... [--visual] [--effort E] "prompt"
 mc run    --spec -            # full RunSpec as JSON on stdin (the remote-safe form)
 mc ls     [--json]
@@ -529,8 +544,12 @@ webhook = ""                                  # optional: POST target
 # example shipped: direct Telegram sendMessage using the box's own bot token
 ```
 
-Payload is the full Run record (both axes, cost, artifacts, stderr path). One notification
-per terminal transition, deduped by run id. Claw integrations are configs, not code.
+Payload is the full Run record (both axes, cost, artifacts, stderr path) plus the
+failure's WHY: `exit_code` (from the exited event; null for lost runs) and, when the
+run did not succeed, `error` - the last harness-error / stderr-tail / cap-exceeded
+excerpt - so an orchestrator never has to round-trip through `mc show` to learn what
+went wrong. One notification per terminal transition, deduped by run id. Claw
+integrations are configs, not code.
 
 ## Storage layout
 
