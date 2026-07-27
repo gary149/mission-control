@@ -991,11 +991,12 @@ describe("mission-control e2e (stub harness)", () => {
     };
   }
 
-  test("notify hook that never reads stdin does not crash a read command (EPIPE)", async () => {
-    const { insertRun, getRun, updateRun } = await import("../src/core/db.ts");
+  test("notify hook that never reads stdin does not crash mc reap; read commands stay side-effect free", async () => {
+    const { insertRun, getRun, eventsAfter, updateRun } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
     const configPath = join(home, "config.toml");
     const original = readFileSync(configPath, "utf8");
+    const counterPath = join(home, "epipe-counter.txt");
 
     const id = "epipe1";
     // Large enough to exceed the OS pipe buffer (observed ~64KB on both
@@ -1007,16 +1008,26 @@ describe("mission-control e2e (stub harness)", () => {
     insertRun(placeholderRun(id, { title: "x".repeat(300_000), notified: false }) as never);
 
     try {
-      // A hook that exits immediately without ever reading stdin.
-      writeFileSync(configPath, `[notify]\nexec = "exit 0"\n`);
+      // A hook that never reads stdin, exits 0, and counts its invocations.
+      writeFileSync(configPath, `[notify]\nexec = "printf x >> ${counterPath}; exit 0"\n`);
 
+      // `mc reap` is the delivering path now (`ls`/`show`/`tail` no longer
+      // dispatch at all - see reapLostRuns's doc comment), so it's the one
+      // that must survive the EPIPE, not crash with a raw stack trace, and
+      // correctly record the truncated write as NOT delivered (round 2's
+      // fix), leaving `notified` false for a later retry.
+      const reap = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(reap.status, 0, reap.stderr);
+      assert.equal(readFileSync(counterPath, "utf8"), "x");
+      assert.equal(getRun(id)!.notified, false);
+
+      // Read commands touching the same run must not crash either, AND must
+      // not re-dispatch the hook at all (side-effect free): no new
+      // invocation, no new notify_result event.
       const ls = spawnSync(process.execPath, [entry, "ls"], { encoding: "utf8", env: { ...process.env } });
-      assert.equal(ls.status, 0, ls.stderr); // must not crash with a raw EPIPE stack trace
+      assert.equal(ls.status, 0, ls.stderr);
       assert.ok(ls.stdout.includes(id), ls.stdout);
 
-      // The bug reproduces on every future command touching the run (the
-      // crash happens before `notified` flips), so a second, different read
-      // command must also survive.
       const show = spawnSync(process.execPath, [entry, "show", id], {
         encoding: "utf8",
         env: { ...process.env },
@@ -1025,11 +1036,12 @@ describe("mission-control e2e (stub harness)", () => {
       assert.equal(show.status, 0, show.stderr);
       assert.ok(show.stdout.includes(id), show.stdout);
 
-      // Exit 0 alone does not mean delivered: this hook never drained the
-      // oversized payload, so the write failed (EPIPE) partway through. The
-      // stdin error is captured as a delivery fact, not just swallowed - see
-      // the dedicated truncated-read test below for the full assertion.
-      assert.equal(getRun(id)!.notified, false);
+      assert.equal(readFileSync(counterPath, "utf8"), "x"); // ls/show did NOT re-invoke the hook
+      assert.equal(
+        eventsAfter(id, 0).filter((e: any) => e.kind === "notify_result").length,
+        1, // only mc reap's attempt - ls/show recorded nothing
+      );
+      assert.equal(getRun(id)!.notified, false); // still pending; read commands never touch it
     } finally {
       writeFileSync(configPath, original);
       // Cleanup, not part of the assertion: this run is left permanently
@@ -1037,6 +1049,54 @@ describe("mission-control e2e (stub harness)", () => {
       // `mc reap` in later tests iterates every unnotified terminal run - an
       // unnotified leftover here would make an unrelated test's exec hook
       // fire an extra, unexpected time.
+      updateRun(id, { notified: true });
+    }
+  });
+
+  test("mc tail on a run with a permanently-failing hook terminates promptly and does not loop", async () => {
+    const { insertRun, getRun, updateRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    const counterPath = join(home, "tail-counter.txt");
+
+    const id = "tail001";
+    // Already terminal at insert time - `mc tail` should hit its
+    // break condition on the very first poll if it isn't looping.
+    insertRun(placeholderRun(id, { exit: "failed", verdict: "failed_verification", notified: false }) as never);
+
+    try {
+      // Drains stdin cleanly (no EPIPE noise here) and always fails delivery.
+      writeFileSync(configPath, `[notify]\nexec = "cat >/dev/null; printf x >> ${counterPath}; exit 1"\n`);
+
+      // Before the fix, `mc tail` re-dispatched the failing hook on every
+      // 500ms poll (a fresh notify_result event always counted as "new",
+      // so the loop's break condition never fired) and never returned. The
+      // spawnSync timeout is the backstop that turns a regression here into
+      // a fast test failure instead of a hung suite.
+      const tail = spawnSync(process.execPath, [entry, "tail", id], {
+        encoding: "utf8",
+        env: { ...process.env },
+        timeout: 8_000,
+      });
+      assert.equal(tail.status, 0, tail.stderr || `timed out/killed: signal=${tail.signal}`);
+      assert.ok(tail.stdout.includes("-- terminal:"), tail.stdout);
+
+      // Read path: at most one invocation (in practice zero - `mc tail`
+      // never dispatches at all now), and `notified` stays false, pending
+      // retry via `mc reap`.
+      const invocationsFromTail = existsSync(counterPath) ? readFileSync(counterPath, "utf8").length : 0;
+      assert.ok(invocationsFromTail <= 1, `expected at most one hook invocation from the read path, got ${invocationsFromTail}`);
+      assert.equal(getRun(id)!.notified, false);
+
+      // The delivery path still retries.
+      const reap = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(reap.status, 0, reap.stderr);
+      const invocationsAfterReap = readFileSync(counterPath, "utf8").length;
+      assert.ok(invocationsAfterReap > invocationsFromTail, "mc reap did not retry delivery");
+      assert.equal(getRun(id)!.notified, false); // still failing every time
+    } finally {
+      writeFileSync(configPath, original);
       updateRun(id, { notified: true });
     }
   });
