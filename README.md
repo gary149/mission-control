@@ -42,7 +42,7 @@ exists with real content - not that the agent claimed success.
 ## Commands
 
 ```sh
-mc run --harness H [--model M] [--gateway openrouter] [--budget 2] \
+mc run --harness H [--model M] [--gateway openrouter] [--budget 99] \
        [--max-minutes 360] [--artifact PATH] [--visual] "task"
 mc ls                        # every run: exit + verdict + cost, at a glance
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
@@ -77,7 +77,7 @@ host, any OpenRouter model runs through any harness:
 
 ```sh
 mc run --harness opencode --gateway openrouter --model moonshotai/kimi-k3 \
-  --budget 2 --artifact app.py "build the thing"   # --budget 2 = hard cap at $2 of spend
+  --budget 99 --artifact app.py "build the thing"   # --budget 99 = hard cap at $99 of spend
 ```
 
 Where the harness reports real metered cost (`opencode`, `pi`), `--budget` (USD) kills
