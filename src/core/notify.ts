@@ -89,7 +89,18 @@ export async function notifyTerminal(run: Run, config: McConfig): Promise<void> 
       // before the claim above can be released, the same crash would
       // reproduce on every future command that touches this run. Mirrors the
       // child.on("error", ...) guard below, which covers spawn-time failures.
-      child.stdin.on("error", () => {});
+      //
+      // A stdin error is also a DELIVERY fact, not just a crash to swallow: it
+      // means the hook process did not receive the full payload (it closed
+      // its read end, or otherwise refused the write, before we finished
+      // sending). A hook that reads a few bytes then exits 0 would otherwise
+      // be recorded delivered:true from the exit code alone - the payload
+      // never actually arrived, so `notified` must not flip true and fix 2's
+      // retry must fire.
+      let stdinFailed = false;
+      child.stdin.on("error", () => {
+        stdinFailed = true;
+      });
       // A hung hook must never pin the supervisor or block the webhook below.
       let timedOut = false;
       const timer = setTimeout(() => {
@@ -103,11 +114,17 @@ export async function notifyTerminal(run: Run, config: McConfig): Promise<void> 
         child.stdin.write(payload);
         child.stdin.end();
       } catch {
-        /* covered by the stdin "error" listener above */
+        stdinFailed = true; // same fact, just observed synchronously
       }
       child.on("close", (code) => {
         clearTimeout(timer);
-        resolveWait(timedOut ? { delivered: false, error: "timeout" } : { delivered: code === 0, exit_code: code });
+        resolveWait(
+          timedOut
+            ? { delivered: false, error: "timeout" }
+            : stdinFailed
+              ? { delivered: false, error: "stdin write failed; payload not fully sent", exit_code: code }
+              : { delivered: code === 0, exit_code: code },
+        );
       });
       child.on("error", (error) => {
         clearTimeout(timer);
