@@ -140,6 +140,7 @@ own headless mode:
 - **claude-code**: `claude -p --output-format stream-json` (+ `--resume <session>` for resume)
 - **codex**: `codex exec --json` (resume gated off until it smoke-tests clean)
 - **kimi-code**: `kimi -p --output-format stream-json` (+ `--session <id>` for resume)
+- **opencode**: `opencode run --format json --auto` (+ `-s <id>` for resume)
 - **pi**: RPC mode, JSONL over stdio (`packages/coding-agent` rpc-client shape)
 
 ```ts
@@ -237,6 +238,23 @@ runbook knowledge currently scattered across skill files, made executable:
   the run degrades to `unverifiable`, the correct fail direction. Failures exit 1
   with an empty stdout. Subscription (Kimi OAuth) is deferred until a real
   `kimi login` exists to verify the credential layout against.
+- **opencode** (grounded in 1.18.7, probed live): `run --format json --auto` - one
+  `{type, timestamp, sessionID, part}` envelope per line, sessionID on EVERY line, six
+  event types, permission requests auto-approved server-side by `--auto` (older
+  releases spelled the flag `--dangerously-skip-permissions`; without it run mode
+  auto-rejects, never hangs). No explicit done event: `step_finish` is the per-step
+  boundary (one per model step even without tools) and doubles as `turn_end` - several
+  per run, deltas summed, the pi model. `step_finish.cost`/`.tokens` are per-step
+  DELTAS (probed: 0.0217/0.0056/0.0051 across three steps - a cumulative series would
+  grow), so gateway-mode cost is genuinely metered and `--budget` enforceable.
+  Gateway mode gets full XDG isolation (`XDG_DATA_HOME/CONFIG/CACHE/STATE` -> per-run
+  scratch `opencode-home`) plus `OPENROUTER_API_KEY` (the one env var its builtin
+  openrouter provider reads) and the model rewritten `openrouter/<id>`; subscription
+  mode is deliberately unisolated (the resident `~/.local/share/opencode/auth.json`
+  IS the login). `OPENCODE_DISABLE_AUTOUPDATE=1` always (in-place self-upgrade
+  mid-run is the claude-code updater failure class). api_key mode is refused by
+  declaration: opencode picks the credential env var per --model's provider prefix,
+  which the one-var-per-harness model cannot express.
 
 Two mechanisms keep this honest:
 
@@ -341,8 +359,10 @@ zero config.
 nothing provider-related to the child env, it only *verifies the login exists* on this
 host (existence/structure checks only, values never read): claude-code's macOS Keychain
 entry ("Claude Code-credentials") or Linux `~/.claude/.credentials.json`; codex's
-`~/.codex/auth.json` with a non-null `tokens` field; pi's `~/.pi/agent/auth.json` slot
-for the model's provider. Missing login = fail closed: "run `<cli> login` on this host."
+`~/.codex/auth.json` with a non-null `tokens` field; opencode's
+`~/.local/share/opencode/auth.json` slot for the model's provider (provider-prefixed
+model required, same rule as pi); pi's `~/.pi/agent/auth.json` slot for the model's
+provider. Missing login = fail closed: "run `<cli> login` on this host."
 Headless hosts use each CLI's own long-lived-token flow (e.g. `claude setup-token` →
 `CLAUDE_CODE_OAUTH_TOKEN`), performed once per unix user, on that host.
 
@@ -379,9 +399,11 @@ empty per-run `CODEX_HOME`** so a cached ChatGPT auth.json can never collide wit
 explicit provider key (codex's key-vs-oauth precedence is documented-buggy); kimi-code
 gets `KIMI_MODEL_PROVIDER_TYPE=openai` + `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_NAME` +
 `KIMI_MODEL_API_KEY` plus a fresh per-run `KIMI_CODE_HOME` (the gateway's own env var
-name is never forwarded - kimi would ignore it); pi gets `--provider` plus exactly the
-gateway's env var and nothing else (pi reads ambient env unconditionally, so the
-allowlist must stay this narrow).
+name is never forwarded - kimi would ignore it); opencode gets fresh per-run XDG roots
+plus `OPENROUTER_API_KEY` and the model rewritten `openrouter/<id>` (its builtin
+openrouter provider, gateway limited to openrouter in v0 like pi); pi gets
+`--provider` plus exactly the gateway's env var and nothing else (pi reads ambient env
+unconditionally, so the allowlist must stay this narrow).
 
 **Env construction (all modes):** the child env is built additively from an EMPTY object —
 `{PATH, HOME, LANG, TERM}` plus the exact mode-specific keys above. There is no
@@ -405,6 +427,8 @@ from what the adapter happens to emit:
 | claude-code | gateway | unavailable | null (CLI's figure uses Anthropic's price table on non-Anthropic tokens; kept raw in events, never copied) | refused |
 | codex | any | unavailable | null (no cost field in `--json` in any mode; tokens only) | refused |
 | kimi-code | any | unavailable | null (stream-json carries no usage or dollar telemetry at all - not even tokens) | refused |
+| opencode | gateway | metered_reported | `step_finish.cost` per-step deltas summed (probed sane on the openrouter path) | allowed |
+| opencode | subscription | unavailable | null (other provider packages have documented $0.00 cost bugs; unprobed) | refused |
 | pi | subscription | metered_reported | pi's `usage.cost.total` (pi's OAuth "extra usage" is genuinely per-token billed — the one subscription that is NOT flat) | allowed |
 | pi | gateway | metered_reported | pi's `usage.cost.total` | allowed |
 

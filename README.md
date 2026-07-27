@@ -41,9 +41,9 @@ and CI fails any change where the committed `dist/` is stale.
 
 ## Use
 
-Four harness adapters - claude-code, codex, kimi-code, pi - each verified end-to-end
-against the real CLI by `mc harness check` (launch, verify, session capture, native
-resume).
+Five harness adapters - claude-code, codex, kimi-code, opencode, pi - each verified
+end-to-end against the real CLI by `mc harness check` (launch, verify, session capture,
+native resume).
 
 ```sh
 mc help
@@ -58,6 +58,10 @@ mc run --harness claude-code --gateway openrouter \
 # Moonshot's own CLI as the harness (model required; api_key mode uses MOONSHOT_API_KEY):
 mc run --harness kimi-code --gateway openrouter \
   --model moonshotai/kimi-k3 --max-minutes 30 --artifact hello.txt "..."
+
+# opencode via OpenRouter (metered per-step cost, so --budget is enforceable):
+mc run --harness opencode --gateway openrouter \
+  --model moonshotai/kimi-k3 --budget 2 --artifact hello.txt "..."
 
 mc resume <id> "also add tests"   # continue the session, new linked run, same workdir
                                   # (inherits the parent's artifacts/visual/caps)
