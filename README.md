@@ -16,8 +16,6 @@ prompt and it installs itself:
 ```text
 Install mission-control on this machine:
 npm install -g https://github.com/gary149/mission-control/archive/refs/heads/main.tar.gz
-(needs Node >= 22.13). Then run `mc harness ls` and tell me which harnesses
-and auth modes are ready here.
 ```
 
 **Or by hand:**
