@@ -976,4 +976,118 @@ describe("mission-control e2e (stub harness)", () => {
       writeFileSync(configPath, original);
     }
   });
+
+  function placeholderRun(id: string, overrides: Record<string, unknown>) {
+    return {
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "placeholder", title: "placeholder", spec_path: join(home, `${id}.json`),
+      workdir: join(home, id), session_id: null, exit: "succeeded", verdict: "verified",
+      started_at: new Date().toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key" as const, gateway: null,
+      pid: null, supervisor_pid: null, stderr_path: join(home, `${id}.log`),
+      artifacts: [], verify_evidence: null, notified: false,
+      ...overrides,
+    };
+  }
+
+  test("notify hook that never reads stdin does not crash a read command (EPIPE)", async () => {
+    const { insertRun, getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+
+    const id = "epipe1";
+    // Large enough to exceed the OS pipe buffer (observed ~64KB on both
+    // Linux and macOS): the write can't complete in one synchronous syscall,
+    // so part of it queues and lands after the hook has already exited and
+    // closed its end - the exact EPIPE window the fix guards. A realistic
+    // payload (a short title, a 300-char error excerpt) rarely reaches that
+    // size, but nothing stops a long title from doing so.
+    insertRun(placeholderRun(id, { title: "x".repeat(300_000), notified: false }) as never);
+
+    try {
+      // A hook that exits immediately without ever reading stdin.
+      writeFileSync(configPath, `[notify]\nexec = "exit 0"\n`);
+
+      const ls = spawnSync(process.execPath, [entry, "ls"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(ls.status, 0, ls.stderr); // must not crash with a raw EPIPE stack trace
+      assert.ok(ls.stdout.includes(id), ls.stdout);
+
+      // The bug reproduces on every future command touching the run (the
+      // crash happens before `notified` flips), so a second, different read
+      // command must also survive.
+      const show = spawnSync(process.execPath, [entry, "show", id], {
+        encoding: "utf8",
+        env: { ...process.env },
+        maxBuffer: 5 * 1024 * 1024,
+      });
+      assert.equal(show.status, 0, show.stderr);
+      assert.ok(show.stdout.includes(id), show.stdout);
+
+      assert.equal(getRun(id)!.notified, true); // hook exited 0: delivered
+    } finally {
+      writeFileSync(configPath, original);
+    }
+  });
+
+  test("failing exec hook leaves notified false; a later mc reap retries delivery", async () => {
+    const { insertRun, getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    const counterPath = join(home, "retry-counter.txt");
+
+    const id = "retry01";
+    insertRun(placeholderRun(id, { exit: "failed", verdict: "failed_verification", notified: false }) as never);
+
+    try {
+      // Drains stdin (no EPIPE noise here - that's the other test's concern),
+      // records one invocation, then always fails to deliver.
+      writeFileSync(configPath, `[notify]\nexec = "cat >/dev/null; printf x >> ${counterPath}; exit 1"\n`);
+
+      const first = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(first.status, 0, first.stderr);
+      assert.equal(readFileSync(counterPath, "utf8"), "x");
+      // SPEC's no-poll contract: a total delivery failure must not be
+      // recorded as discharged, or an orchestrator that honors "do not poll"
+      // waits forever.
+      assert.equal(getRun(id)!.notified, false);
+
+      const second = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(second.status, 0, second.stderr);
+      assert.equal(readFileSync(counterPath, "utf8"), "xx"); // retried: hook invoked again
+      assert.equal(getRun(id)!.notified, false);
+    } finally {
+      writeFileSync(configPath, original);
+    }
+  });
+
+  test("two concurrent notify attempts on the same run dispatch the hook at most once", async () => {
+    const { insertRun, getRun } = await import("../src/core/db.ts");
+    const { notifyTerminal } = await import("../src/core/notify.ts");
+    const { loadConfig } = await import("../src/core/config.ts");
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    const counterPath = join(home, "conc-counter.txt");
+
+    const id = "conc001";
+    insertRun(placeholderRun(id, { notified: false }) as never);
+
+    try {
+      writeFileSync(configPath, `[notify]\nexec = "cat >/dev/null; printf x >> ${counterPath}"\n`);
+      const config = loadConfig();
+      // Both callers race off the SAME stale in-memory snapshot (notified:
+      // false) - exactly the supervisor-vs-reap-vs-read-command race the
+      // atomic claim exists to close.
+      const staleRun = getRun(id)!;
+
+      await Promise.all([notifyTerminal(staleRun, config), notifyTerminal(staleRun, config)]);
+
+      assert.equal(readFileSync(counterPath, "utf8"), "x"); // fired at most once
+      assert.equal(getRun(id)!.notified, true);
+    } finally {
+      writeFileSync(configPath, original);
+    }
+  });
 });
