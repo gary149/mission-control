@@ -31,6 +31,7 @@ export const codex: HarnessAdapter = {
     resume: "native",
     steering: "none",
     cost_reporting: "none", // permanent: exec --json carries tokens only, never dollars
+    tokens_reporting: "reported",
     effort_passthrough: "unknown",
     sandbox: "flag",
     auth_modes: ["subscription", "api_key", "gateway"],

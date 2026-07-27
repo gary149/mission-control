@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/fake-claude.mjs", import.meta.url));
 const FIXTURE_CODEX = fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url));
+const FIXTURE_KIMI = fileURLToPath(new URL("./fixtures/fake-kimi.mjs", import.meta.url));
 const FIXTURE_PI = fileURLToPath(new URL("./fixtures/fake-pi.mjs", import.meta.url));
 
 let home: string;
@@ -44,12 +45,13 @@ describe("mission-control e2e (stub harness)", () => {
     process.env.MC_HOME = home;
     process.env.MC_CLAUDE_BIN = FIXTURE;
     process.env.MC_CODEX_BIN = FIXTURE_CODEX;
+    process.env.MC_KIMI_BIN = FIXTURE_KIMI;
     process.env.MC_PI_BIN = FIXTURE_PI;
     process.env.ANTHROPIC_API_KEY = "sk-test-not-real";
     // Poison: resident on the host, must never reach a child (additive-from-empty env).
     process.env.OPENROUTER_API_KEY = "or-poison-not-real";
     process.env.HF_TOKEN = "hf-poison-not-real";
-    for (const fixture of [FIXTURE, FIXTURE_CODEX, FIXTURE_PI]) chmodSync(fixture, 0o755);
+    for (const fixture of [FIXTURE, FIXTURE_CODEX, FIXTURE_KIMI, FIXTURE_PI]) chmodSync(fixture, 0o755);
     // Notify hook writes its payload to a file we can assert on.
     writeFileSync(join(home, "config.toml"), `[notify]\nexec = "cat > ${home}/notified.json"\n`);
   });
@@ -284,6 +286,133 @@ describe("mission-control e2e (stub harness)", () => {
     assert.throws(
       () => launch(baseSpec({ harness: "pi", auth: { mode: "api_key" } }) as never),
       /does not support auth mode "api_key"[\s\S]*auth\.json/,
+    );
+  });
+
+  test("kimi-code: verified run via gateway; session captured from the trailing resume_hint", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const envDump = join(home, "kimi-env.json");
+    const run = launch(
+      baseSpec({
+        harness: "kimi-code",
+        model: "moonshotai/kimi-k3",
+        prompt: `produce out.txt DUMPENV:${envDump}`,
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    assert.equal(run.cost_basis, "unavailable");
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "verified");
+    // The stream has NO token/cost telemetry - null, never zero or invented.
+    assert.equal(done.cost_usd, null);
+    assert.equal(done.tokens_in, null);
+    assert.equal(done.tokens_out, null);
+    // session_id arrives only in the trailing resume_hint meta line, and the
+    // retry meta noise the fixture leads with must not poison parser health.
+    assert.equal(done.session_id, "session_fake0000-f0a6-4d76-811d-35e6a1e7559e");
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "kimi meta noise must not poison parser health");
+
+    // The gateway credential reaches the child ONLY as KIMI_MODEL_API_KEY (the
+    // one env channel kimi reads); nothing else leaks.
+    const childEnv = JSON.parse(readFileSync(envDump, "utf8"));
+    assert.equal(childEnv.KIMI_MODEL_API_KEY, "or-poison-not-real");
+    assert.equal(childEnv.KIMI_MODEL_PROVIDER_TYPE, "openai");
+    assert.equal(childEnv.KIMI_MODEL_BASE_URL, "https://openrouter.ai/api/v1");
+    assert.equal(childEnv.KIMI_MODEL_NAME, "moonshotai/kimi-k3");
+    assert.ok(String(childEnv.KIMI_CODE_HOME).endsWith("/kimi-home"));
+    assert.equal(childEnv.OPENROUTER_API_KEY, undefined);
+    assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+    assert.equal(childEnv.HF_TOKEN, undefined);
+  });
+
+  test("kimi-code: failed run (empty stdout, exit 1) lands failed + failed_verification", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const run = launch(
+      baseSpec({
+        harness: "kimi-code",
+        model: "moonshotai/kimi-k3",
+        prompt: "fail on purpose FAIL",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "failed");
+    assert.equal(done.verdict, "failed_verification");
+  });
+
+  test("kimi-code: native resume via --session continues the same session", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const parentRun = launch(
+      baseSpec({
+        harness: "kimi-code",
+        model: "moonshotai/kimi-k3",
+        prompt: "first step: produce out.txt",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const parent = await waitTerminal(() => getRun(parentRun.id));
+    assert.equal(parent.session_id, "session_fake0000-f0a6-4d76-811d-35e6a1e7559e");
+
+    const resumed = launch(
+      baseSpec({
+        harness: "kimi-code",
+        model: "moonshotai/kimi-k3",
+        prompt: "second step: append",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+      { parent },
+    );
+    const resumedDone = await waitTerminal(() => getRun(resumed.id));
+    assert.equal(resumedDone.exit, "succeeded");
+    assert.equal(resumedDone.session_id, parent.session_id); // same id re-emitted on resume
+    const content = readFileSync(join(parent.workdir, "out.txt"), "utf8");
+    assert.ok(content.includes("resumed OK")); // the fake appends only under --session
+  });
+
+  test("kimi-code: --budget refused (no cost telemetry in any mode)", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(
+      () =>
+        launch(
+          baseSpec({
+            harness: "kimi-code",
+            model: "moonshotai/kimi-k3",
+            budget_usd: 1,
+            auth: { mode: "gateway", gateway: "openrouter" },
+          }) as never,
+        ),
+      /--budget has no meaning for kimi-code/,
+    );
+  });
+
+  test("kimi-code: model is required (no default_model in the scratch home)", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(
+      () => launch(baseSpec({ harness: "kimi-code", auth: { mode: "api_key" } }) as never),
+      /kimi-code requires --model/,
+    );
+  });
+
+  test("kimi-code: subscription refused by capability declaration", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    assert.throws(
+      () =>
+        launch(
+          baseSpec({ harness: "kimi-code", model: "kimi-for-coding", auth: { mode: "subscription" } }) as never,
+        ),
+      /does not support auth mode "subscription"/,
     );
   });
 

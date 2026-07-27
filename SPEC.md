@@ -130,6 +130,7 @@ own headless mode:
 
 - **claude-code**: `claude -p --output-format stream-json` (+ `--resume <session>` for resume)
 - **codex**: `codex exec --json` (resume gated off until it smoke-tests clean)
+- **kimi-code**: `kimi -p --output-format stream-json` (+ `--session <id>` for resume)
 - **pi**: RPC mode, JSONL over stdio (`packages/coding-agent` rpc-client shape)
 
 ```ts
@@ -148,6 +149,7 @@ interface Capabilities {
   resume: "none" | "native";
   steering: "none";                              // v1: no adapter supports mid-run steering
   cost_reporting: "per_run" | "none";
+  tokens_reporting: "reported" | "none";         // whether the native stream carries token counts at all
   effort_passthrough: "honored" | "stripped_for_non_anthropic" | "unknown";
   sandbox: "flag" | "none";
   auth_modes: ("subscription" | "api_key" | "gateway")[];
@@ -210,6 +212,22 @@ runbook knowledge currently scattered across skill files, made executable:
   context channel — the proven gist-injection pattern, generalized).
 - **pi**: RPC mode; effort maps to the `:thinkingLevel` model suffix; session enabled
   (never `--no-session`) so `session_id` and resume stay possible.
+- **kimi-code** (grounded in 0.29.2, probed live): `-p --output-format stream-json`,
+  which is always full-auto (no permission-bypass flag exists or is accepted; kimi
+  force-approves every tool call in prompt mode). The CLI ignores conventional
+  credential env vars entirely; the only env channel is the `KIMI_MODEL_*` family
+  (`KIMI_MODEL_NAME`, `KIMI_MODEL_API_KEY`, `KIMI_MODEL_PROVIDER_TYPE`,
+  `KIMI_MODEL_BASE_URL`), which synthesizes an in-memory provider+model per run -
+  nothing secret written to disk. `KIMI_CODE_HOME` is pointed at a per-run scratch
+  sibling of the workdir (state isolation; resume runs reuse the parent's workdir and
+  therefore its sessions). A model is REQUIRED in both supported auth modes (the
+  scratch home has no `default_model`), refused by name at preflight. The stream has
+  no session-start, no turn-complete, and no token/cost telemetry; the trailing
+  `session.resume_hint` meta line is the only end-of-run marker and doubles as
+  `turn_end` + session capture - if kimi drops it (upstream #1897, signal shutdown),
+  the run degrades to `unverifiable`, the correct fail direction. Failures exit 1
+  with an empty stdout. Subscription (Kimi OAuth) is deferred until a real
+  `kimi login` exists to verify the credential layout against.
 
 Two mechanisms keep this honest:
 
@@ -320,10 +338,12 @@ Headless hosts use each CLI's own long-lived-token flow (e.g. `claude setup-toke
 `CLAUDE_CODE_OAUTH_TOKEN`), performed once per unix user, on that host.
 
 **2. `api_key` (`--api-key`).** mc reads the adapter's conventional env var
-(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) from its own resident environment on this host
-and forwards exactly that one variable. Not offered for pi: pi has its own `--api-key`
-flag, but mc refuses to use it because CLI arguments leak via process listings; pi's own
-auth.json or `--gateway` covers every real case.
+(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `MOONSHOT_API_KEY`) from its own resident
+environment on this host and forwards exactly that one variable (for kimi-code the
+value is delivered to the child as `KIMI_MODEL_API_KEY`, the only env channel that CLI
+reads). Not offered for pi: pi has its own `--api-key` flag, but mc refuses to use it
+because CLI arguments leak via process listings; pi's own auth.json or `--gateway`
+covers every real case.
 
 **3. `gateway` (`--gateway <name>`).** Routes through an OpenAI/Anthropic-compatible
 gateway. One builtin entry ships (`openrouter`); more via config:
@@ -347,9 +367,12 @@ Per-adapter wiring is the documented recipe for each CLI: claude-code gets
 `ANTHROPIC_SMALL_FAST_MODEL` + `CLAUDE_CODE_SUBAGENT_MODEL` (and never
 `ANTHROPIC_API_KEY`); codex gets `-c model_providers.<name>.*` overrides plus a **fresh
 empty per-run `CODEX_HOME`** so a cached ChatGPT auth.json can never collide with the
-explicit provider key (codex's key-vs-oauth precedence is documented-buggy); pi gets
-`--provider` plus exactly the gateway's env var and nothing else (pi reads ambient env
-unconditionally, so the allowlist must stay this narrow).
+explicit provider key (codex's key-vs-oauth precedence is documented-buggy); kimi-code
+gets `KIMI_MODEL_PROVIDER_TYPE=openai` + `KIMI_MODEL_BASE_URL` + `KIMI_MODEL_NAME` +
+`KIMI_MODEL_API_KEY` plus a fresh per-run `KIMI_CODE_HOME` (the gateway's own env var
+name is never forwarded - kimi would ignore it); pi gets `--provider` plus exactly the
+gateway's env var and nothing else (pi reads ambient env unconditionally, so the
+allowlist must stay this narrow).
 
 **Env construction (all modes):** the child env is built additively from an EMPTY object —
 `{PATH, HOME, LANG, TERM}` plus the exact mode-specific keys above. There is no
@@ -372,6 +395,7 @@ from what the adapter happens to emit:
 | claude-code | api_key | metered_reported | stream-json `total_cost_usd` verbatim | allowed |
 | claude-code | gateway | unavailable | null (CLI's figure uses Anthropic's price table on non-Anthropic tokens; kept raw in events, never copied) | refused |
 | codex | any | unavailable | null (no cost field in `--json` in any mode; tokens only) | refused |
+| kimi-code | any | unavailable | null (stream-json carries no usage or dollar telemetry at all - not even tokens) | refused |
 | pi | subscription | metered_reported | pi's `usage.cost.total` (pi's OAuth "extra usage" is genuinely per-token billed — the one subscription that is NOT flat) | allowed |
 | pi | gateway | metered_reported | pi's `usage.cost.total` | allowed |
 
