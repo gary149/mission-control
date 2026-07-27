@@ -18,6 +18,25 @@ function baseEnv() {
     return env;
 }
 /**
+ * Signal the child's whole process GROUP, not just the harness pid. The child
+ * is spawned `detached: true`, which makes it a process-group leader, so
+ * `-pid` reaches every descendant it spawned (dev servers, tool subprocesses)
+ * that a bare `child.kill()` would otherwise orphan on every cap-kill. The
+ * group can already be gone (child exited between our check and the signal,
+ * or this platform has no group semantics for it) - that is not an error.
+ */
+function killGroup(child, signal) {
+    const pid = child.pid;
+    if (!pid)
+        return;
+    try {
+        process.kill(-pid, signal);
+    }
+    catch {
+        /* group already gone */
+    }
+}
+/**
  * Watch one run to termination: tail events, enforce caps, verify, notify, exit.
  * Runs as a detached process; everything it learns lands in SQLite, not stdout.
  */
@@ -59,6 +78,9 @@ export async function supervise(runId) {
         cwd: run.workdir,
         env: { ...baseEnv(), ...env },
         stdio: ["ignore", "pipe", "pipe"],
+        // Process-group leader: a harness's own descendants (dev servers, tool
+        // subprocesses) must die with it on every kill path (SPEC: Supervisor).
+        detached: true,
     });
     updateRun(runId, { exit: "running", pid: child.pid ?? null, supervisor_pid: process.pid });
     insertEvent(runId, "status_change", { exit: "running", pid: child.pid, supervisor_pid: process.pid });
@@ -67,8 +89,8 @@ export async function supervise(runId) {
     if (run.max_minutes) {
         timer = setTimeout(() => {
             killedByCap = `max_minutes (${run.max_minutes}) exceeded`;
-            child.kill("SIGTERM");
-            setTimeout(() => child.kill("SIGKILL"), 10_000).unref?.();
+            killGroup(child, "SIGTERM");
+            setTimeout(() => killGroup(child, "SIGKILL"), 10_000).unref?.();
         }, run.max_minutes * 60_000);
     }
     // Stall detection: raw stream lines (stdout OR stderr) are the activity
@@ -86,8 +108,8 @@ export async function supervise(runId) {
                 return;
             if (Date.now() - lastActivity > idleMs) {
                 killedByCap = `max_idle_minutes (${run.max_idle_minutes}) exceeded: no harness output since ${new Date(lastActivity).toISOString()}`;
-                child.kill("SIGTERM");
-                setTimeout(() => child.kill("SIGKILL"), 10_000).unref?.();
+                killGroup(child, "SIGTERM");
+                setTimeout(() => killGroup(child, "SIGKILL"), 10_000).unref?.();
             }
         }, Math.max(1000, Math.min(30_000, idleMs / 4)));
     }
@@ -152,7 +174,7 @@ export async function supervise(runId) {
             const currentCost = updates.cost_usd ?? null;
             if (run.budget_usd != null && currentCost != null && currentCost > run.budget_usd) {
                 killedByCap = `budget ($${run.budget_usd}) exceeded at $${currentCost.toFixed(4)}`;
-                child.kill("SIGTERM");
+                killGroup(child, "SIGTERM");
             }
         }
     });

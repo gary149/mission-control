@@ -33,6 +33,41 @@ function pidAlive(pid: number | null): boolean {
   }
 }
 
+/**
+ * Signal the harness's whole process GROUP (it's spawned `detached: true` by
+ * the supervisor, making it a group leader) so descendants die too, not just
+ * the recorded pid. Falls back to signalling the bare pid if the group is
+ * already gone or unavailable (e.g. a pid whose group predates this fix).
+ */
+function killGroupOrPid(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/**
+ * `mc kill` is a short-lived CLI invocation, not a resident watcher, so the
+ * SIGTERM-then-SIGKILL escalation happens inline here rather than being
+ * scheduled and left to outlive the process: send SIGTERM to the group,
+ * poll `pidAlive` for up to `timeoutMs`, then SIGKILL the group if it's
+ * still standing. This is what makes the kill actually land instead of
+ * firing one signal and hoping (the P1 this closes).
+ */
+async function killWithEscalation(pid: number, timeoutMs = 10_000): Promise<void> {
+  killGroupOrPid(pid, "SIGTERM");
+  const start = Date.now();
+  while (pidAlive(pid) && Date.now() - start < timeoutMs) {
+    await sleep(250);
+  }
+  if (pidAlive(pid)) killGroupOrPid(pid, "SIGKILL");
+}
+
 const QUEUED_GRACE_MS = 15_000;
 
 function isActive(run: Run): boolean {
@@ -436,16 +471,20 @@ export async function cliMain(argv: string[]): Promise<void> {
 
       case "kill": {
         const run = requireRun(args[0]);
-        if (run.exit !== "running") fail(`run ${run.id} is not running (exit=${run.exit})`);
-        // Request only - the run stays `running` until the supervisor observes
-        // the process actually die (close signal) and writes the terminal row.
+        // Gate on the harness pid actually being alive, not on exit==="running":
+        // a `lost` run (dead supervisor, live harness) is exactly the case
+        // nobody else can signal, so it must stay killable through mc.
+        const alive = pidAlive(run.pid);
+        if (run.exit !== "running" && !(run.exit === "lost" && alive)) {
+          fail(`run ${run.id} is not killable (exit=${run.exit}${run.pid ? `, harness pid ${run.pid} ${alive ? "alive" : "already dead"}` : ", no pid recorded"})`);
+        }
+        // Durable intent BEFORE signalling: even if the harness traps SIGTERM
+        // and exits 0, or the escalation below has to wait out the full
+        // timeout, this event is already on the ledger so a killed run is
+        // never mislabeled succeeded.
         insertEvent(run.id, "status_change", { kill_requested: true, by: "mc kill" });
         if (run.pid) {
-          try {
-            process.kill(run.pid, "SIGTERM");
-          } catch {
-            /* already gone; reap on next ls */
-          }
+          await killWithEscalation(run.pid);
         }
         console.log(`kill requested for ${run.id} (mc tail ${run.id} to watch it land)`);
         break;
