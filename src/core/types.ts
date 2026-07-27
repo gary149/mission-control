@@ -84,6 +84,8 @@ export interface Capabilities {
   resume: "none" | "native";
   steering: "none";
   cost_reporting: "per_run" | "none";
+  /** Whether the native stream carries token counts mc can extract at all. */
+  tokens_reporting: "reported" | "none";
   effort_passthrough: "honored" | "stripped_for_non_anthropic" | "unknown";
   sandbox: "flag" | "none";
   auth_modes: AuthMode[];

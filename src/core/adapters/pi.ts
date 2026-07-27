@@ -27,6 +27,7 @@ export const pi: HarnessAdapter = {
     resume: "native",
     steering: "none",
     cost_reporting: "per_run",
+    tokens_reporting: "reported",
     effort_passthrough: "unknown",
     sandbox: "none",
     auth_modes: ["subscription", "gateway"], // api_key deliberately absent: pi has an
