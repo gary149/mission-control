@@ -2,8 +2,8 @@
 
 ![Mission Control](docs/hero.jpg)
 
-**Your orchestrator picks the harness, picks the model, fires off the task - and gets
-pinged with a verified result, so it can build on work that actually happened.**
+**You pick the harness, the model, and the task. Your orchestrator fires it off, gets
+pinged with a verified result - and just keeps moving.**
 
 `mc` launches an agent CLI headlessly, supervises it to completion, mechanically checks
 the outputs it promised, and reports two independent truths per run: `exit` (did the
