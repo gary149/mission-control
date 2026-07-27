@@ -2,8 +2,8 @@
 
 ![Mission Control](docs/hero.jpg)
 
-**Your orchestrator fires a coding agent at a task and gets pinged with a verified
-result - so it can build on work that actually happened.**
+**Your orchestrator fires any coding agent, on any model, at a task - and gets pinged
+with a verified result, so it can build on work that actually happened.**
 
 `mc` launches an agent CLI headlessly, supervises it to completion, mechanically checks
 the outputs it promised, and reports two independent truths per run: `exit` (did the
