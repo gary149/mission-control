@@ -285,7 +285,9 @@ COMMANDS
                 inherits harness/model/auth/artifacts/visual/caps. Default:
                 native session resume in the SAME workdir. With --fresh
                 [--at SHA]: checkpoint restart - NEW worktree at the commit,
-                NEW session (for escaping stuck or degraded sessions)
+                NEW session (for escaping stuck or degraded sessions).
+                Overrides: --artifact (replaces inherited list), --visual,
+                --no-visual, --max-minutes, --budget
   reap          Cron-safe: mark dead-supervisor runs lost, deliver pending
                 notifications (e.g. */10 * * * * mc reap)
   ls            List runs; also reaps lost runs and re-delivers missed notifications
