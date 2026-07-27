@@ -1029,8 +1029,14 @@ describe("mission-control e2e (stub harness)", () => {
 
     // Fabricate exactly the case the old hard `exit === "running"` guard could
     // never reach: a dead supervisor (no watcher pid alive) with a real, live,
-    // detached (process-group-leader) harness still running unwatched.
-    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    // detached (process-group-leader) harness still running unwatched. The
+    // workdir is embedded in the process's own argv so the ownership check
+    // (added for the PID-reuse P1) recognizes it as legitimately owned -
+    // exactly what a real harness spawned with `cwd: run.workdir` looks like
+    // to `ps -o command=`, minus the workdir actually appearing in argv for
+    // this inline `-e` stand-in, so we fake that one detail explicitly.
+    const workdir = join(home, "lost-none");
+    const orphan = spawn(process.execPath, ["-e", `/* mc-test-workdir:${workdir} */ setInterval(() => {}, 1000)`], {
       detached: true,
       stdio: "ignore",
     });
@@ -1041,7 +1047,7 @@ describe("mission-control e2e (stub harness)", () => {
     insertRun({
       id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
       host: "test", prompt: "orphaned harness", title: "orphaned harness", spec_path: join(home, "lost-none.json"),
-      workdir: join(home, "lost-none"), session_id: null, exit: "lost", verdict: "pending",
+      workdir, session_id: null, exit: "lost", verdict: "pending",
       started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
@@ -1067,6 +1073,53 @@ describe("mission-control e2e (stub harness)", () => {
       (e: any) => e.kind === "status_change" && (e.payload as any)?.kill_requested,
     );
     assert.ok(killRequested, "kill_requested event missing for the lost-but-alive run");
+  });
+
+  test("mc kill: refuses a lost run whose pid now belongs to an unrelated process (possible PID reuse)", async () => {
+    const { insertRun, eventsAfter } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // A real, live process standing in for "the recorded pid got reused by
+    // something else" - its command line references neither a harness
+    // binary nor this run's workdir, so the ownership check must refuse it
+    // rather than signal a stranger.
+    const stranger = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    stranger.unref();
+    await sleep(200);
+
+    const id = "reuse01";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "stale lost row", title: "stale lost row", spec_path: join(home, "reuse-none.json"),
+      workdir: join(home, "reuse-none-workdir"), session_id: null, exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 3_600_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: stranger.pid, supervisor_pid: 999_999_994, stderr_path: join(home, "reuse-none.log"),
+      artifacts: [], verify_evidence: null, notified: false,
+    } as never);
+
+    try {
+      assert.ok(pidAlive(stranger.pid), "sanity: the stand-in process must be alive before mc kill runs");
+
+      const res = await runMc(entry, ["kill", id]);
+      assert.equal(res.status, 1);
+      assert.ok(res.stderr.includes("possible PID reuse"), res.stderr);
+      assert.ok(res.stderr.includes(String(stranger.pid)), res.stderr);
+
+      // Refused, not signalled: the unrelated process must be untouched, and
+      // no kill_requested event should have been recorded for it either.
+      assert.ok(pidAlive(stranger.pid), "the unrelated process must not have been touched by mc kill");
+      const killRequested = eventsAfter(id, 0).find(
+        (e: any) => e.kind === "status_change" && (e.payload as any)?.kill_requested,
+      );
+      assert.ok(!killRequested, "kill_requested must not be recorded for a refused PID-reuse kill");
+    } finally {
+      if (stranger.pid) process.kill(stranger.pid, "SIGKILL");
+    }
   });
 
   test("mc kill: still refuses a lost run whose pid is already dead", async () => {

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -53,21 +54,68 @@ function killGroupOrPid(pid, signal) {
     }
 }
 /**
+ * Whether the harness's process GROUP still has any member alive - checked
+ * via signal 0 against the negative pid, which throws ESRCH only once every
+ * process in the group is gone. Deliberately broader than checking the
+ * leader pid alone: if the harness exits on SIGTERM but a descendant it
+ * spawned ignores it, the leader pid disappears (a plain `pidAlive` check
+ * would read "dead" and skip SIGKILL) while the group - and a
+ * pipe-holding descendant that can block the supervisor's close event -
+ * survives. Escalation must track the group, not the leader.
+ */
+function groupAlive(pid) {
+    try {
+        process.kill(-pid, 0);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+/**
  * `mc kill` is a short-lived CLI invocation, not a resident watcher, so the
  * SIGTERM-then-SIGKILL escalation happens inline here rather than being
  * scheduled and left to outlive the process: send SIGTERM to the group,
- * poll `pidAlive` for up to `timeoutMs`, then SIGKILL the group if it's
+ * poll GROUP liveness for up to `timeoutMs`, then SIGKILL the group if it's
  * still standing. This is what makes the kill actually land instead of
  * firing one signal and hoping (the P1 this closes).
  */
 async function killWithEscalation(pid, timeoutMs = 10_000) {
     killGroupOrPid(pid, "SIGTERM");
     const start = Date.now();
-    while (pidAlive(pid) && Date.now() - start < timeoutMs) {
+    while (groupAlive(pid) && Date.now() - start < timeoutMs) {
         await sleep(250);
     }
-    if (pidAlive(pid))
+    if (groupAlive(pid))
         killGroupOrPid(pid, "SIGKILL");
+}
+/**
+ * Best-effort identity check before signalling a LOST run's recorded pid. A
+ * `lost` row can sit on the ledger indefinitely, so by the time anyone runs
+ * `mc kill` on it the pid may have been reused by an unrelated process -
+ * killing it (or its group) would hit the wrong target. Not a heartbeat
+ * system: just confirm the live process's command line still references
+ * either the exact harness binary this run was launched with (recorded in
+ * the archived spec) or this run's workdir before trusting the pid still
+ * belongs to it. A `running` row's supervisor is (or was, moments ago)
+ * alive, so callers skip this for anything but `lost`.
+ */
+function looksLikeOwnedProcess(pid, run) {
+    const ps = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8" });
+    const command = ps.stdout.trim();
+    if (!command)
+        return false; // vanished between the pidAlive check and here
+    let bin = null;
+    try {
+        const stored = JSON.parse(readFileSync(run.spec_path, "utf8"));
+        bin = typeof stored.bin === "string" ? stored.bin : null;
+    }
+    catch {
+        /* archived spec missing/unreadable - fall through to the workdir check */
+    }
+    if (bin && command.includes(bin))
+        return true;
+    return command.includes(run.workdir);
 }
 const QUEUED_GRACE_MS = 15_000;
 function isActive(run) {
@@ -490,6 +538,12 @@ export async function cliMain(argv) {
                 const alive = pidAlive(run.pid);
                 if (run.exit !== "running" && !(run.exit === "lost" && alive)) {
                     fail(`run ${run.id} is not killable (exit=${run.exit}${run.pid ? `, harness pid ${run.pid} ${alive ? "alive" : "already dead"}` : ", no pid recorded"})`);
+                }
+                // A `lost` row can persist indefinitely before anyone runs `mc kill`
+                // on it, so its recorded pid may since have been reused by an
+                // unrelated process - refuse rather than signal a stranger.
+                if (run.exit === "lost" && run.pid && !looksLikeOwnedProcess(run.pid, run)) {
+                    fail(`pid ${run.pid} no longer looks like run ${run.id}'s harness (possible PID reuse); refusing`);
                 }
                 // Durable intent BEFORE signalling: even if the harness traps SIGTERM
                 // and exits 0, or the escalation below has to wait out the full
