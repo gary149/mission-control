@@ -7,7 +7,11 @@ const BUILTIN_GATEWAYS = {
         base_url_anthropic: "https://openrouter.ai/api",
         base_url_openai: "https://openrouter.ai/api/v1",
         env_var: "OPENROUTER_API_KEY",
-        wire_api: "chat",
+        // codex >= 0.145 dropped wire_api="chat" support entirely ("no longer
+        // supported... set wire_api = \"responses\""); OpenRouter serves both
+        // /v1/chat/completions and /v1/responses, confirmed live via
+        // `mc harness check codex --gateway openrouter`.
+        wire_api: "responses",
     },
 };
 export function mcHome() {

@@ -388,12 +388,14 @@ gateway. One builtin entry ships (`openrouter`); more via config:
 base_url_anthropic = "https://openrouter.ai/api"      # claude-code shim wiring
 base_url_openai    = "https://openrouter.ai/api/v1"   # codex / pi wiring
 env_var            = "OPENROUTER_API_KEY"             # NAME of the resident var; value never stored
-wire_api           = "chat"                           # codex only: "chat" | "responses" — which
+wire_api           = "responses"                      # codex only: "chat" | "responses" — which
                                                       # OpenAI wire protocol the gateway speaks.
                                                       # Guessing wrong breaks codex silently
                                                       # (omnigent's documented OpenRouter-vs-LiteLLM
-                                                      # symptom); `mc harness check --gateway <name>`
-                                                      # asserts the configured value actually works.
+                                                      # symptom; codex >= 0.145 dropped "chat" support
+                                                      # entirely — confirmed live 2026-07-27);
+                                                      # `mc harness check --gateway <name>` asserts the
+                                                      # configured value actually works.
 ```
 
 Gateway mode requires a provider-prefixed model id (`x-ai/grok-4.6`); refused otherwise.
