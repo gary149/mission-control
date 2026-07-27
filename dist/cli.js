@@ -566,8 +566,11 @@ export async function cliMain(argv) {
                 const unnotified = new Set(before.filter((r) => !isActive(r) && !r.notified).map((r) => r.id));
                 const after = await reapLostRuns(before);
                 const lost = after.filter((r) => r.exit === "lost" && activeIds.has(r.id)).length;
-                const delivered = after.filter((r) => r.notified && (unnotified.has(r.id) || (activeIds.has(r.id) && r.exit === "lost"))).length;
-                console.log(`reaped ${lost} lost run(s), delivered ${delivered} pending notification(s)`);
+                // "settled": the delivery obligation was discharged - a channel
+                // delivered, or none were configured. Not a claim of guaranteed
+                // external receipt (a failed hook leaves notified=false for retry).
+                const settled = after.filter((r) => r.notified && (unnotified.has(r.id) || (activeIds.has(r.id) && r.exit === "lost"))).length;
+                console.log(`reaped ${lost} lost run(s), settled ${settled} notification(s)`);
                 break;
             }
             case "harness": {
