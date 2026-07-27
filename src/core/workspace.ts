@@ -49,3 +49,36 @@ export function createWorkdir(id: string, sourceCwd: string | null): { workdir: 
   mkdirSync(workdir, { recursive: true });
   return { workdir, isGit: false };
 }
+
+/**
+ * Checkpoint restart (mc resume --fresh): a NEW detached worktree at a commit
+ * of the parent run's repo. The tracked replacement for the hand-rolled
+ * `git worktree add` operators used to escape stuck sessions.
+ */
+export function createWorkdirFromCheckpoint(
+  id: string,
+  parentWorkdir: string,
+  at: string | null,
+): { workdir: string; checkpoint: string } {
+  const dir = runDir(id);
+  mkdirSync(dir, { recursive: true });
+  const workdir = join(dir, "work");
+
+  const ref = at ?? "HEAD";
+  const resolved = spawnSync("git", ["-C", parentWorkdir, "rev-parse", "--verify", `${ref}^{commit}`], {
+    encoding: "utf8",
+  });
+  if (resolved.status !== 0) {
+    throw new PreflightError(
+      `checkpoint "${ref}" is not a commit in the parent run's workdir (${resolved.stderr?.trim() || "rev-parse failed"})`,
+    );
+  }
+  const checkpoint = resolved.stdout.trim();
+  const wt = spawnSync("git", ["-C", parentWorkdir, "worktree", "add", "--detach", workdir, checkpoint], {
+    encoding: "utf8",
+  });
+  if (wt.status !== 0) {
+    throw new PreflightError(`git worktree add failed: ${wt.stderr?.trim()}`);
+  }
+  return { workdir, checkpoint };
+}

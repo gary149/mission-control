@@ -523,6 +523,76 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(child2.verdict, "failed_verification"); // other.txt never produced - override really applied
   });
 
+  test("resume --fresh: checkpoint restart in a NEW worktree with a NEW session", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, findRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const repo = mkdtempSync(join(tmpdir(), "mc-fresh-"));
+    try {
+      spawnSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
+      writeFileSync(join(repo, "README.md"), "seed\n");
+      spawnSync("sh", ["-c", `git -C ${repo} add -A && git -C ${repo} -c user.email=t@t -c user.name=t commit -q -m seed`], { stdio: "ignore" });
+
+      const parentRun = launch(
+        baseSpec({ prompt: "do the work and commit it GITCOMMIT", cwd: repo, artifacts: ["out.txt"] }) as never,
+      );
+      const parent = await waitTerminal(() => getRun(parentRun.id));
+      assert.equal(parent.verdict, "verified");
+      const parentHead = spawnSync("git", ["-C", parent.workdir, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+
+      const res = spawnSync(process.execPath, [entry, "resume", parent.id, "--fresh", "start over from the checkpoint"], {
+        encoding: "utf8",
+        env: { ...process.env },
+      });
+      assert.equal(res.status, 0, res.stderr);
+      const child = await waitTerminal(() => findRun(res.stdout.trim().split(/\s+/)[0]!));
+      assert.notEqual(child.workdir, parent.workdir); // NEW worktree, not the parent's
+      assert.equal(child.parent_run_id, parent.id);
+      assert.deepEqual(child.artifacts, ["out.txt"]); // inherited
+      assert.equal(child.exit, "succeeded");
+
+      const childSpec = JSON.parse(readFileSync(child.spec_path, "utf8"));
+      assert.equal(childSpec.resume_session_id, undefined); // NEW session by design
+      assert.equal(childSpec.checkpoint, parentHead); // anchored at the parent's HEAD
+      assert.equal(childSpec.git_head_at_launch, parentHead);
+
+      // --at with a non-commit is refused at preflight.
+      const bad = spawnSync(process.execPath, [entry, "resume", parent.id, "--fresh", "--at", "deadbeef", "x"], {
+        encoding: "utf8",
+        env: { ...process.env },
+      });
+      assert.equal(bad.status, 1);
+      assert.ok(bad.stderr.includes("not a commit"), bad.stderr);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("mc reap: marks dead-supervisor runs lost and delivers their notification", async () => {
+    const { insertRun, getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "feed01";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "orphaned run", title: "orphaned run", spec_path: join(home, "none.json"),
+      workdir: join(home, "none"), session_id: null, exit: "running", verdict: "pending",
+      started_at: new Date(Date.now() - 60_000).toISOString(), ended_at: null,
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: null, supervisor_pid: 999_999_999, stderr_path: join(home, "none.log"),
+      artifacts: [], verify_evidence: null, notified: false,
+    } as never);
+
+    const res = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(res.stdout.includes("reaped 1 lost"), res.stdout);
+    const reaped = getRun(id)!;
+    assert.equal(reaped.exit, "lost");
+    assert.equal(reaped.notified, true);
+  });
+
   test("notify_result records that no hooks were configured", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun, eventsAfter } = await import("../src/core/db.ts");

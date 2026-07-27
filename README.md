@@ -55,6 +55,11 @@ mc run --harness claude-code --gateway openrouter \
   --model moonshotai/kimi-k3 --max-minutes 30 --artifact hello.txt "..."
 
 mc resume <id> "also add tests"   # continue the session, new linked run, same workdir
+                                  # (inherits the parent's artifacts/visual/caps)
+mc resume <id> --fresh --at <sha> "start over from the checkpoint"
+                                  # checkpoint restart: NEW worktree at the commit,
+                                  # NEW session - for escaping stuck sessions
+mc reap                           # cron-safe lost-run sweep + pending notifications
 mc harness check codex            # live validation against the real CLI (costs cents)
 
 mc ls            # what ran, both status axes, cost, age
