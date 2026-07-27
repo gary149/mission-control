@@ -83,7 +83,7 @@ describe("mission-control e2e (stub harness)", () => {
 
     // Event stream has the normalized shape.
     const kinds = eventsAfter(run.id, 0).map((e: any) => e.kind);
-    for (const expected of ["started", "text", "tool_call", "cost_update", "verify_result", "exited"]) {
+    for (const expected of ["started", "text", "tool_call", "cost_update", "verify_result", "notify_result", "exited"]) {
       assert.ok(kinds.includes(expected), `missing event kind ${expected} in ${kinds}`);
     }
 
@@ -444,5 +444,101 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(done.exit, "succeeded");
     assert.equal(done.verdict, "unverifiable");
     assert.ok(done.verify_evidence.includes("parser_health"));
+  });
+
+  test("git_effect: committed clean-tree work reaches verified", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const repo = mkdtempSync(join(tmpdir(), "mc-gitcommit-"));
+    try {
+      spawnSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
+      writeFileSync(join(repo, "README.md"), "seed\n");
+      spawnSync("sh", ["-c", `git -C ${repo} add -A && git -C ${repo} -c user.email=t@t -c user.name=t commit -q -m seed`], { stdio: "ignore" });
+
+      const run = launch(baseSpec({ prompt: "do the work and commit it GITCOMMIT", cwd: repo }) as never);
+      const done = await waitTerminal(() => getRun(run.id));
+      // Tree is CLEAN (the agent committed) - old dirty-tree check failed this.
+      assert.equal(done.exit, "succeeded");
+      assert.equal(done.verdict, "verified");
+      const gitCheck = JSON.parse(done.verify_evidence).find((c: any) => c.name === "git_effect");
+      assert.ok(gitCheck.passed, `git_effect failed: ${gitCheck.detail}`);
+      assert.ok(gitCheck.detail.includes("1 commit(s)"), gitCheck.detail);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("codex: harness-reported failure lands failed_verification with a HEALTHY parser", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const run = launch(
+      baseSpec({ harness: "codex", prompt: "fail on purpose FAIL", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "failed");
+    assert.equal(done.verdict, "failed_verification"); // an honest failure, not blindness
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "cleanly parsed harness errors must not poison parser health");
+  });
+
+  test("CLI resume inherits artifacts/visual/caps from the parent; flags override", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, findRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const parentRun = launch(
+      baseSpec({
+        harness: "codex",
+        prompt: "first: produce out.txt",
+        artifacts: ["out.txt"],
+        max_minutes: 30,
+        auth: { mode: "api_key" },
+      }) as never,
+    );
+    const parent = await waitTerminal(() => getRun(parentRun.id));
+
+    // Inheritance: no flags -> parent's artifacts and cap carry over.
+    const res = spawnSync(process.execPath, [entry, "resume", parent.id, "second: append"], {
+      encoding: "utf8",
+      env: { ...process.env },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const childId = res.stdout.trim().split(/\s+/)[0]!;
+    const child = await waitTerminal(() => findRun(childId));
+    assert.deepEqual(child.artifacts, ["out.txt"]);
+    assert.equal(child.max_minutes, 30);
+    assert.equal(child.parent_run_id, parent.id);
+    assert.equal(child.exit, "succeeded");
+
+    // Override: explicit --artifact replaces the inherited list.
+    const res2 = spawnSync(process.execPath, [entry, "resume", parent.id, "--artifact", "other.txt", "third: something else"], {
+      encoding: "utf8",
+      env: { ...process.env },
+    });
+    assert.equal(res2.status, 0, res2.stderr);
+    const child2 = await waitTerminal(() => findRun(res2.stdout.trim().split(/\s+/)[0]!));
+    assert.deepEqual(child2.artifacts, ["other.txt"]);
+    assert.equal(child2.verdict, "failed_verification"); // other.txt never produced - override really applied
+  });
+
+  test("notify_result records that no hooks were configured", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    try {
+      writeFileSync(configPath, "# no notify hooks\n");
+      const run = launch(baseSpec({ prompt: "quiet run", artifacts: ["out.txt"] }) as never);
+      const done = await waitTerminal(() => getRun(run.id));
+      assert.equal(done.notified, true); // obligation discharged...
+      const notify = eventsAfter(run.id, 0).find((e: any) => e.kind === "notify_result");
+      assert.ok(notify, "notify_result event missing");
+      assert.deepEqual((notify!.payload as any).configured, []); // ...but the ledger says nobody was told
+      assert.ok(String((notify!.payload as any).note).includes("no notify hooks"));
+    } finally {
+      writeFileSync(configPath, original);
+    }
   });
 });

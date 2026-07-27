@@ -36,6 +36,10 @@ emit({
   type: "item.completed",
   item: { id: "item_1", type: "command_execution", command: "/bin/zsh -lc 'echo hi'", aggregated_output: "hi\n", exit_code: 0, status: "completed" },
 });
+// Cleanly-parsed harness warning + todo noise (observed live) - must not
+// poison parser health or block `verified`:
+emit({ type: "item.completed", item: { id: "item_w", type: "error", message: "Model metadata for `fake/model` not found. Defaulting to fallback metadata" } });
+emit({ type: "item.completed", item: { id: "item_t", type: "todo_list", items: [{ text: "step", completed: true }] } });
 
 if (prompt.includes("FAIL")) {
   emit({ type: "turn.failed", error: "simulated failure" });

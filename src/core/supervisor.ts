@@ -96,7 +96,10 @@ export async function supervise(runId: string): Promise<void> {
     stdoutFile.write(clean + "\n");
     const mapped = adapter.mapLine(clean);
     for (const event of mapped.events) {
-      if (event.kind === "error") parseErrors++;
+      // Parser health tracks BLINDNESS (lines mc could not read), never
+      // harness-reported errors - a cleanly parsed failure is still a parse.
+      const note = (event.payload as { note?: string } | null)?.note;
+      if (event.kind === "error" && (note === "unparsed" || note === "unknown-native-event")) parseErrors++;
       if (event.kind === "turn_end") sawResult = true;
       insertEvent(runId, event.kind, event.payload);
     }
@@ -158,7 +161,8 @@ export async function supervise(runId: string): Promise<void> {
   if (killedByCap) insertEvent(runId, "error", { note: "cap-exceeded", detail: killedByCap });
 
   const parserHealthy = parseErrors === 0 && sawResult;
-  const verification = verify({ ...current, exit } as Run, spec, exitCode, isGit, parserHealthy);
+  const headAtLaunch = typeof stored.git_head_at_launch === "string" ? stored.git_head_at_launch : null;
+  const verification = verify({ ...current, exit } as Run, spec, exitCode, isGit, parserHealthy, headAtLaunch);
   insertEvent(runId, "verify_result", { verdict: verification.verdict, checks: JSON.parse(verification.evidence) });
 
   updateRun(runId, {
