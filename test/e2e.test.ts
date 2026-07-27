@@ -1,6 +1,6 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,47 @@ async function waitTerminal(getRun: () => any, timeoutMs = 20000): Promise<any> 
     if (Date.now() - start > timeoutMs) throw new Error(`run did not terminate: ${JSON.stringify(run)}`);
     await sleep(200);
   }
+}
+
+/** Poll until the supervisor has spawned the harness and recorded its pid. */
+async function waitRunning(getRun: () => any, timeoutMs = 10000): Promise<any> {
+  const start = Date.now();
+  for (;;) {
+    const run = getRun();
+    if (run && run.exit === "running" && run.pid) return run;
+    if (Date.now() - start > timeoutMs) throw new Error(`run never reached running with a pid: ${JSON.stringify(run)}`);
+    await sleep(100);
+  }
+}
+
+/** Mirrors cli.ts's pidAlive (not exported); used by tests to assert no orphan survives a kill. */
+function pidAlive(pid: number | null | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run `mc <args>` asynchronously (not spawnSync). When a test is itself the
+ * parent of a fabricated orphan process (see the "lost-but-alive" kill test),
+ * spawnSync blocks this process's whole event loop for as long as the child
+ * runs, which prevents it from reaping the orphan's zombie once the group
+ * signal lands - a self-inflicted artifact of the test harness, not
+ * something a real caller (an unrelated shell/orchestrator) ever hits.
+ */
+function runMc(entry: string, args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [entry, ...args], { env: { ...process.env } });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 
 /** notified.json is rewritten per terminal run; poll until it carries this id. */
@@ -956,6 +997,98 @@ describe("mission-control e2e (stub harness)", () => {
     const reaped = getRun(id)!;
     assert.equal(reaped.exit, "lost");
     assert.equal(reaped.notified, true);
+  });
+
+  test("mc kill: SIGTERM escalates and no orphaned harness process is left behind", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // Long enough that without a working kill this test's own timeout would
+    // fire first - the escalation, not the fixture exiting on its own, is
+    // what has to end this run.
+    const run = launch(baseSpec({ prompt: "hang silently SLEEP:60000", artifacts: ["out.txt"] }) as never);
+    const running = await waitRunning(() => getRun(run.id));
+    assert.ok(running.pid! > 0);
+    assert.ok(pidAlive(running.pid), "harness pid should be alive before kill");
+
+    const res = spawnSync(process.execPath, [entry, "kill", run.id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(res.stdout.includes("kill requested"), res.stdout);
+
+    const done = await waitTerminal(() => getRun(run.id), 15000);
+    assert.equal(done.exit, "killed");
+    // The whole point of process-group containment: the harness pid is
+    // actually dead, not just marked killed in the ledger.
+    assert.equal(pidAlive(done.pid), false, `pid ${done.pid} still alive after mc kill`);
+  });
+
+  test("mc kill: a lost-but-alive run (dead supervisor, live harness) is now killable", async () => {
+    const { insertRun, eventsAfter } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // Fabricate exactly the case the old hard `exit === "running"` guard could
+    // never reach: a dead supervisor (no watcher pid alive) with a real, live,
+    // detached (process-group-leader) harness still running unwatched.
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    orphan.unref();
+    await sleep(200); // give it a moment to actually be running
+
+    const id = "l0st001";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "orphaned harness", title: "orphaned harness", spec_path: join(home, "lost-none.json"),
+      workdir: join(home, "lost-none"), session_id: null, exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: orphan.pid, supervisor_pid: 999_999_998, stderr_path: join(home, "lost-none.log"),
+      artifacts: [], verify_evidence: null, notified: false,
+    } as never);
+
+    assert.ok(pidAlive(orphan.pid), "sanity: orphan must be alive before mc kill runs");
+
+    // Async, not spawnSync: this test is itself the orphan's parent, and a
+    // synchronous spawn would block this process from reaping it - see runMc.
+    const res = await runMc(entry, ["kill", id]);
+    // The old code: `if (run.exit !== "running") fail(...)` - a "lost" row was
+    // unconditionally refused here, even with a live pid. This must now work.
+    assert.equal(res.status, 0, res.stderr);
+
+    // mc kill's own escalation already waited this out; poll a little more for CI slack.
+    const start = Date.now();
+    while (pidAlive(orphan.pid) && Date.now() - start < 15000) await sleep(200);
+    assert.equal(pidAlive(orphan.pid), false, `orphaned harness pid ${orphan.pid} still alive after mc kill`);
+
+    const killRequested = eventsAfter(id, 0).find(
+      (e: any) => e.kind === "status_change" && (e.payload as any)?.kill_requested,
+    );
+    assert.ok(killRequested, "kill_requested event missing for the lost-but-alive run");
+  });
+
+  test("mc kill: still refuses a lost run whose pid is already dead", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "dead0001";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "long dead", title: "long dead", spec_path: join(home, "dead-none.json"),
+      workdir: join(home, "dead-none"), session_id: null, exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: 999_999_997, supervisor_pid: 999_999_996, stderr_path: join(home, "dead-none.log"),
+      artifacts: [], verify_evidence: null, notified: false,
+    } as never);
+    assert.ok(!pidAlive(999_999_997), "sanity: this pid must not actually exist");
+
+    const res = spawnSync(process.execPath, [entry, "kill", id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(res.status, 1);
+    assert.ok(res.stderr.includes("not killable"), res.stderr);
   });
 
   test("notify_result records that no hooks were configured", async () => {
