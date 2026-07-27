@@ -30,11 +30,11 @@ delegate to.
 ## First run
 
 ```sh
-mc run --harness claude-code --max-minutes 30 --artifact index.html \
+mc run --harness claude-code --max-minutes 360 --artifact index.html \
   "build a playable browser FPS in a single index.html: pointer-lock aim, WASD, targets that fall when shot"
 ```
 
-Yes, really - hand it a half-hour build and close the laptop. Each run executes in an
+Yes, really - give it the afternoon and close the laptop. Each run executes in an
 isolated workdir, and `verified` means mc mechanically checked the declared artifact
 exists with real content - not that the agent claimed success.
 
@@ -42,7 +42,7 @@ exists with real content - not that the agent claimed success.
 
 ```sh
 mc run --harness H [--model M] [--gateway openrouter] [--budget 2] \
-       [--max-minutes 30] [--artifact PATH] [--visual] "task"
+       [--max-minutes 360] [--artifact PATH] [--visual] "task"
 mc ls                        # every run: exit + verdict + cost, at a glance
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
 mc show <id>                 # full record + verification evidence
