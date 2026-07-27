@@ -75,6 +75,8 @@ export async function supervise(runId) {
     // event) must cap the verdict at unverifiable, not pass silently.
     let parseErrors = 0;
     let sawResult = false;
+    let sawHarnessError = false;
+    const stderrTail = [];
     // Delta-reporting harnesses (pi, codex) emit per-turn figures; accumulate.
     let costAccumulated = null;
     let tokensInAccumulated = null;
@@ -91,6 +93,8 @@ export async function supervise(runId) {
             const note = event.payload?.note;
             if (event.kind === "error" && (note === "unparsed" || note === "unknown-native-event"))
                 parseErrors++;
+            if (event.kind === "error" && note === "harness-error")
+                sawHarnessError = true;
             if (event.kind === "turn_end")
                 sawResult = true;
             insertEvent(runId, event.kind, event.payload);
@@ -132,7 +136,13 @@ export async function supervise(runId) {
         }
     });
     const stderrLines = createInterface({ input: child.stderr });
-    stderrLines.on("line", (line) => stderrFile.write(scrub(line) + "\n"));
+    stderrLines.on("line", (line) => {
+        const clean = scrub(line);
+        stderrFile.write(clean + "\n");
+        stderrTail.push(clean);
+        if (stderrTail.length > 10)
+            stderrTail.shift();
+    });
     const { exitCode, signal } = await new Promise((resolveWait) => {
         child.on("close", (code, sig) => resolveWait({ exitCode: code, signal: sig }));
         child.on("error", (error) => {
@@ -156,6 +166,14 @@ export async function supervise(runId) {
         exit = "failed";
     if (killedByCap)
         insertEvent(runId, "error", { note: "cap-exceeded", detail: killedByCap });
+    // A harness that dies with no harness-reported error on stdout (kimi-code's
+    // probed failure mode) would otherwise leave its reason ONLY in stderr.log -
+    // invisible to mc tail/show and the notify payload. Synthesize the reason
+    // into the stream. "stderr-tail" is not in the parse-health counted set, so
+    // verdicts are unaffected.
+    if (exit !== "succeeded" && !sawHarnessError && stderrTail.length > 0) {
+        insertEvent(runId, "error", { note: "stderr-tail", excerpt: stderrTail.join("\n").slice(-1000) });
+    }
     const parserHealthy = parseErrors === 0 && sawResult;
     const headAtLaunch = typeof stored.git_head_at_launch === "string" ? stored.git_head_at_launch : null;
     const verification = verify({ ...current, exit }, spec, exitCode, isGit, parserHealthy, headAtLaunch);

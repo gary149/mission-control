@@ -123,6 +123,12 @@ Adapters must map into this union or emit `error`; unknown native events are sto
 under `error` with a parse note, never dropped. This union is deliberately shaped so it
 could become an RPC wire vocabulary later (pi-mono style) without a schema migration.
 
+Failure reasons are first-class: every adapter surfaces harness-reported failures as
+`error` events with note `harness-error` (cleanly parsed, never counted against parser
+health), and when a run exits nonzero having reported nothing on stdout (kimi-code's
+probed failure mode), the supervisor synthesizes the reason from the scrubbed stderr
+tail (note `stderr-tail`) - a silent death still carries its why in the stream.
+
 `subagent` carries internal task/subagent lifecycle as structured data
 (`phase, task_id, description, status`) without violating the one-Run-per-lead-session
 rule (ADR 0001): subagents still never become ledger rows; `mc tail` just gains a live
@@ -529,8 +535,12 @@ webhook = ""                                  # optional: POST target
 # example shipped: direct Telegram sendMessage using the box's own bot token
 ```
 
-Payload is the full Run record (both axes, cost, artifacts, stderr path). One notification
-per terminal transition, deduped by run id. Claw integrations are configs, not code.
+Payload is the full Run record (both axes, cost, artifacts, stderr path) plus the
+failure's WHY: `exit_code` (from the exited event; null for lost runs) and, when the
+run did not succeed, `error` - the last harness-error / stderr-tail / cap-exceeded
+excerpt - so an orchestrator never has to round-trip through `mc show` to learn what
+went wrong. One notification per terminal transition, deduped by run id. Claw
+integrations are configs, not code.
 
 ## Storage layout
 
