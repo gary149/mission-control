@@ -144,6 +144,11 @@ export const pi = {
             }
             case "error":
                 events.push({ kind: "error", payload: { note: "harness-error", raw: line.slice(0, 2000) } });
+                // Defensive: this top-level shape is not grounded in observed pi output
+                // (unlike the stopReason path above). If it IS terminal, synthesize
+                // turn_end like codex/opencode so a cleanly parsed failure never lands
+                // unverifiable on parser health alone.
+                events.push({ kind: "turn_end", payload: { is_error: true } });
                 break;
             default:
                 events.push({ kind: "error", payload: { note: "unknown-native-event", raw: line.slice(0, 2000) } });

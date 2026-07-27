@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { McConfig } from "./config.ts";
-import { insertEvent, updateRun } from "./db.ts";
+import { eventsAfter, insertEvent, updateRun } from "./db.ts";
 import type { Run } from "./types.ts";
 
 /**
@@ -15,6 +15,27 @@ import type { Run } from "./types.ts";
  */
 export async function notifyTerminal(run: Run, config: McConfig): Promise<void> {
   if (run.notified) return;
+  // The push carries the failure REASON, not just the fact: exit_code from the
+  // exited event (null for lost runs, which never wrote one) and the last
+  // harness-error / stderr-tail / cap-exceeded excerpt when the run failed -
+  // so an orchestrator need not round-trip through mc show to learn why.
+  const events = eventsAfter(run.id, 0);
+  const exited = [...events].reverse().find((e) => e.kind === "exited");
+  const exitCode = (exited?.payload as { exit_code?: number | null } | undefined)?.exit_code ?? null;
+  let errorExcerpt: string | null = null;
+  if (run.exit !== "succeeded") {
+    const err = [...events]
+      .reverse()
+      .find(
+        (e) =>
+          e.kind === "error" &&
+          ["harness-error", "stderr-tail", "cap-exceeded"].includes(String((e.payload as { note?: string } | null)?.note)),
+      );
+    if (err) {
+      const p = err.payload as { message?: string; excerpt?: string; detail?: string; raw?: string };
+      errorExcerpt = String(p.message ?? p.excerpt ?? p.detail ?? p.raw ?? "").slice(0, 300) || null;
+    }
+  }
   const payload = JSON.stringify({
     id: run.id,
     title: run.title,
@@ -22,7 +43,9 @@ export async function notifyTerminal(run: Run, config: McConfig): Promise<void> 
     model: run.model,
     host: run.host,
     exit: run.exit,
+    exit_code: exitCode,
     verdict: run.verdict,
+    error: errorExcerpt,
     cost_usd: run.cost_usd,
     cost_basis: run.cost_basis,
     tokens_in: run.tokens_in,

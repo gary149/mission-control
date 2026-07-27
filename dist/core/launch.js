@@ -35,6 +35,10 @@ export function launch(spec, options = {}) {
     // Fail-closed preflight: caps, artifacts, auth (incl. budget enforceability), binary.
     assertPositive("--budget", spec.budget_usd);
     assertPositive("--max-minutes", spec.max_minutes);
+    // Idle cap allows 0 (explicit disable) but nothing negative or non-finite.
+    if (spec.max_idle_minutes != null && (!Number.isFinite(spec.max_idle_minutes) || spec.max_idle_minutes < 0)) {
+        throw new PreflightError(`--max-idle-minutes must be a finite number >= 0 (0 disables stall detection)`);
+    }
     for (const artifact of spec.artifacts) {
         if (!artifactStaysInside(artifact)) {
             throw new PreflightError(`artifact path "${artifact}" is absolute or escapes the run workdir; declare workdir-relative paths only`);
@@ -127,6 +131,10 @@ export function launch(spec, options = {}) {
         tokens_out: null,
         budget_usd: spec.budget_usd,
         max_minutes: spec.max_minutes,
+        // Stall detection defaults ON: fleet data shows healthy runs never exceed
+        // ~12m of stream silence while real stalls sit at 75-128m (run b758fe
+        // class). 30m is 2.5x the observed healthy ceiling. 0 disables.
+        max_idle_minutes: spec.max_idle_minutes ?? 30,
         auth_mode: auth.mode,
         gateway: spec.auth.gateway ?? null,
         pid: null,

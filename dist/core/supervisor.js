@@ -71,10 +71,32 @@ export async function supervise(runId) {
             setTimeout(() => child.kill("SIGKILL"), 10_000).unref?.();
         }, run.max_minutes * 60_000);
     }
+    // Stall detection: raw stream lines (stdout OR stderr) are the activity
+    // signal, NOT inserted events - adapters skip benign native noise without
+    // inserting anything, so event gaps overstate silence (a retry storm is
+    // alive). Fleet data: healthy runs never exceed ~12m of stream silence;
+    // real stalls (the b758fe live-locked Agent dispatch class) sit at 75-128m.
+    // SIGKILL escalation is required: a live-locked event loop ignores SIGTERM.
+    let lastActivity = Date.now();
+    let idleTimer = null;
+    const idleMs = (run.max_idle_minutes ?? 0) * 60_000;
+    if (idleMs > 0) {
+        idleTimer = setInterval(() => {
+            if (killedByCap)
+                return;
+            if (Date.now() - lastActivity > idleMs) {
+                killedByCap = `max_idle_minutes (${run.max_idle_minutes}) exceeded: no harness output since ${new Date(lastActivity).toISOString()}`;
+                child.kill("SIGTERM");
+                setTimeout(() => child.kill("SIGKILL"), 10_000).unref?.();
+            }
+        }, Math.max(1000, Math.min(30_000, idleMs / 4)));
+    }
     // Parser health: blindness (unparsed lines, or never seeing a terminal result
     // event) must cap the verdict at unverifiable, not pass silently.
     let parseErrors = 0;
     let sawResult = false;
+    let sawHarnessError = false;
+    const stderrTail = [];
     // Delta-reporting harnesses (pi, codex) emit per-turn figures; accumulate.
     let costAccumulated = null;
     let tokensInAccumulated = null;
@@ -84,6 +106,7 @@ export async function supervise(runId) {
     stdoutLines.on("line", (line) => {
         const clean = scrub(line);
         stdoutFile.write(clean + "\n");
+        lastActivity = Date.now();
         const mapped = adapter.mapLine(clean);
         for (const event of mapped.events) {
             // Parser health tracks BLINDNESS (lines mc could not read), never
@@ -91,6 +114,8 @@ export async function supervise(runId) {
             const note = event.payload?.note;
             if (event.kind === "error" && (note === "unparsed" || note === "unknown-native-event"))
                 parseErrors++;
+            if (event.kind === "error" && note === "harness-error")
+                sawHarnessError = true;
             if (event.kind === "turn_end")
                 sawResult = true;
             insertEvent(runId, event.kind, event.payload);
@@ -132,7 +157,14 @@ export async function supervise(runId) {
         }
     });
     const stderrLines = createInterface({ input: child.stderr });
-    stderrLines.on("line", (line) => stderrFile.write(scrub(line) + "\n"));
+    stderrLines.on("line", (line) => {
+        const clean = scrub(line);
+        stderrFile.write(clean + "\n");
+        lastActivity = Date.now();
+        stderrTail.push(clean);
+        if (stderrTail.length > 10)
+            stderrTail.shift();
+    });
     const { exitCode, signal } = await new Promise((resolveWait) => {
         child.on("close", (code, sig) => resolveWait({ exitCode: code, signal: sig }));
         child.on("error", (error) => {
@@ -142,6 +174,8 @@ export async function supervise(runId) {
     });
     if (timer)
         clearTimeout(timer);
+    if (idleTimer)
+        clearInterval(idleTimer);
     stdoutFile.end();
     stderrFile.end();
     // Classification: a run is `killed` only once the process actually died from
@@ -156,6 +190,14 @@ export async function supervise(runId) {
         exit = "failed";
     if (killedByCap)
         insertEvent(runId, "error", { note: "cap-exceeded", detail: killedByCap });
+    // A harness that dies with no harness-reported error on stdout (kimi-code's
+    // probed failure mode) would otherwise leave its reason ONLY in stderr.log -
+    // invisible to mc tail/show and the notify payload. Synthesize the reason
+    // into the stream. "stderr-tail" is not in the parse-health counted set, so
+    // verdicts are unaffected.
+    if (exit !== "succeeded" && !sawHarnessError && stderrTail.length > 0) {
+        insertEvent(runId, "error", { note: "stderr-tail", excerpt: stderrTail.join("\n").slice(-1000) });
+    }
     const parserHealthy = parseErrors === 0 && sawResult;
     const headAtLaunch = typeof stored.git_head_at_launch === "string" ? stored.git_head_at_launch : null;
     const verification = verify({ ...current, exit }, spec, exitCode, isGit, parserHealthy, headAtLaunch);
