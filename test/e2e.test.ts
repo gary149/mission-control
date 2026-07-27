@@ -211,7 +211,7 @@ describe("mission-control e2e (stub harness)", () => {
       "run", "ls", "show", "tail", "kill", "harness ls", "resume", "reap",
       "--harness", "--model", "--cwd", "--artifact", "--visual", "--no-visual",
       "--max-minutes", "--budget", "--gateway", "--api-key", "--spec",
-      "--fresh", "--at SHA",
+      "--fresh", "--at SHA", "--max-idle-minutes",
       "subscription", "MC_HOME", "config.toml",
     ]) {
       assert.ok(help.includes(expected), `help is missing "${expected}"`);
@@ -315,6 +315,28 @@ describe("mission-control e2e (stub harness)", () => {
     );
     assert.equal(capEvents.length, 1);
     assert.ok(String((capEvents[0]!.payload as any).detail).includes("budget"));
+  });
+
+  test("stall detection: a silent harness is killed at the idle cap", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
+
+    // SLEEP:8000 = the fixture emits its opening events then goes silent long
+    // past the 0.03m (1.8s) idle cap; the watchdog must kill it, not wait.
+    const run = launch(
+      baseSpec({ prompt: "hang silently SLEEP:8000", artifacts: ["out.txt"], max_idle_minutes: 0.03 }) as never,
+    );
+    assert.equal(run.max_idle_minutes, 0.03);
+    const done = await waitTerminal(() => getRun(run.id), 30000);
+    assert.equal(done.exit, "killed");
+    const capEvents = eventsAfter(run.id, 0).filter(
+      (e: any) => e.kind === "error" && (e.payload as any)?.note === "cap-exceeded",
+    );
+    assert.equal(capEvents.length, 1);
+    assert.ok(String((capEvents[0]!.payload as any).detail).includes("max_idle_minutes"));
+    // The stall reason reaches the notify payload like any other cap kill.
+    const payload = await notifiedFor(run.id);
+    assert.ok(String(payload.error).includes("max_idle_minutes"));
   });
 
   test("pi: subscription without a provider-prefixed model is refused (env-dependent defaults)", async () => {

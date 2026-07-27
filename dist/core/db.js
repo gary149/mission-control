@@ -32,6 +32,7 @@ export function openDb() {
       tokens_out INTEGER,
       budget_usd REAL,
       max_minutes REAL,
+      max_idle_minutes REAL,
       auth_mode TEXT NOT NULL,
       gateway TEXT,
       pid INTEGER,
@@ -60,6 +61,8 @@ function migrate(d) {
         d.exec("ALTER TABLE runs RENAME COLUMN goal TO prompt");
     if (columns.includes("session_ref"))
         d.exec("ALTER TABLE runs RENAME COLUMN session_ref TO session_id");
+    if (!columns.includes("max_idle_minutes"))
+        d.exec("ALTER TABLE runs ADD COLUMN max_idle_minutes REAL");
 }
 /** Test-only: drop the cached handle so a new MC_HOME takes effect. */
 export function resetDbForTest() {
@@ -78,7 +81,7 @@ function dollarKeys(obj) {
 const RUN_COLUMNS = [
     "id", "parent_run_id", "root_run_id", "harness", "model", "host", "prompt", "title",
     "spec_path", "workdir", "session_id", "exit", "verdict", "started_at", "ended_at",
-    "cost_usd", "cost_basis", "tokens_in", "tokens_out", "budget_usd", "max_minutes",
+    "cost_usd", "cost_basis", "tokens_in", "tokens_out", "budget_usd", "max_minutes", "max_idle_minutes",
     "auth_mode", "gateway", "pid", "supervisor_pid", "stderr_path", "artifacts", "verify_evidence", "notified",
 ];
 export function insertRun(run) {
