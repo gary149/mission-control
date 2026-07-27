@@ -91,22 +91,33 @@ export const claudeCode = {
         // hook lifecycle chatter, streaming thinking-token counters, and the CLI's
         // own upstream-retry notices (observed live on OpenRouter/kimi runs).
         const BENIGN_SYSTEM = /^(hook_|thinking_tokens$|api_retry$)/;
+        // Subagent/background-task lifecycle arrives as system SUBTYPES (shapes
+        // captured verbatim from a live run, claude-code 2.1.220): task_ids plus
+        // human-readable descriptions/status - the raw material for a subagent
+        // activity feed, mapped to structured events rather than skipped.
+        const SUBAGENT_SYSTEM = /^(task_started|task_progress|task_updated|task_notification|background_tasks_changed)$/;
         switch (obj?.type) {
-            // Benign subagent/background progress noise, deliberately skipped
-            // (observed at 15k+ events per long run on live fleet usage; filing
-            // these as errors made `verified` unreachable for busy runs):
-            case "task_progress":
-            case "tool_progress":
-            case "task_notification":
-            case "task_started":
-            case "task_updated":
-            case "background_tasks_changed":
-                break;
             case "system":
                 if (obj.subtype === "init") {
                     events.push({ kind: "started", payload: { session_id: obj.session_id, model: obj.model } });
                     if (obj.session_id)
                         update = { session_id: obj.session_id };
+                }
+                else if (SUBAGENT_SYSTEM.test(obj.subtype ?? "")) {
+                    events.push({
+                        kind: "subagent",
+                        payload: {
+                            phase: obj.subtype,
+                            task_id: obj.task_id,
+                            task_type: obj.task_type,
+                            description: String(obj.description ?? obj.summary ?? "").slice(0, 500) || undefined,
+                            // task_notification carries status directly; task_updated patches it.
+                            status: obj.status ?? obj.patch?.status,
+                            tasks: Array.isArray(obj.tasks)
+                                ? obj.tasks.map((t) => ({ task_id: t?.task_id, description: String(t?.description ?? "").slice(0, 200) }))
+                                : undefined,
+                        },
+                    });
                 }
                 else if (!BENIGN_SYSTEM.test(obj.subtype ?? "")) {
                     events.push({ kind: "error", payload: { note: "unknown-native-event", raw: line.slice(0, 2000) } });
