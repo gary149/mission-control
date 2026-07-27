@@ -446,6 +446,15 @@ from what the adapter happens to emit:
   event, so even in metered mode a dollar cap could never fire mid-run. `--budget` is
   therefore refused for claude-code entirely in v0 (the table's "allowed" waits for an
   incremental cost signal); `--max-minutes` is the enforceable cap.
+- Two independent backstops, both supervisor-owned: `--max-minutes` (wall clock) and
+  `--max-idle-minutes` (stall detection, default 30, 0 disables). The idle signal is
+  RAW stream lines on stdout or stderr, not inserted events - adapters skip benign
+  native noise without inserting anything, so event gaps overstate silence and a retry
+  storm still counts as alive. Grounded in fleet data: healthy runs (including 5-9 hour
+  missions) never exceeded ~12 minutes of stream silence, while real stalls (the
+  b758fe live-locked Agent dispatch: pid alive, CPU spinning, zero sockets) sat at
+  75-128 minutes. Idle kills escalate SIGTERM to SIGKILL - a live-locked event loop
+  never runs its SIGTERM handler.
 - `--max-minutes` is the universal backstop: the supervisor's existing kill-and-notify
   path triggered by wall clock. It's the only cap available for flat-subscription and
   codex runs, and the mitigation for quota-exhausted runs that retry forever.
@@ -495,7 +504,7 @@ The CLI is a surface, not the product. Structure enforces this:
 ### CLI
 
 ```
-mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N]
+mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N] [--max-idle-minutes N]
           [--gateway NAME | --api-key] [--artifact PATH]... [--visual] [--effort E] "prompt"
 mc run    --spec -            # full RunSpec as JSON on stdin (the remote-safe form)
 mc ls     [--json]

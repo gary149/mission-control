@@ -93,6 +93,7 @@ function parseRunArgs(args) {
     let cwd = null;
     let budget = null;
     let maxMinutes = null;
+    let maxIdleMinutes = null;
     let gateway = null;
     let apiKey = false;
     let visual = false;
@@ -112,6 +113,12 @@ function parseRunArgs(args) {
                 fail(`${arg} must be a finite positive number`);
             return value;
         };
+        const nextNonNegative = () => {
+            const value = Number(next());
+            if (!Number.isFinite(value) || value < 0)
+                fail(`${arg} must be a finite number >= 0 (0 disables)`);
+            return value;
+        };
         switch (arg) {
             case "--harness":
                 harness = next();
@@ -127,6 +134,9 @@ function parseRunArgs(args) {
                 break;
             case "--max-minutes":
                 maxMinutes = nextPositive();
+                break;
+            case "--max-idle-minutes":
+                maxIdleMinutes = nextNonNegative();
                 break;
             case "--gateway":
                 gateway = next();
@@ -166,6 +176,7 @@ function parseRunArgs(args) {
             visual,
             budget_usd: budget,
             max_minutes: maxMinutes,
+            max_idle_minutes: maxIdleMinutes,
             auth: gateway ? { mode: "gateway", gateway } : apiKey ? { mode: "api_key" } : { mode: "subscription" },
         },
     };
@@ -194,6 +205,7 @@ async function readSpecFromStdin() {
         visual: parsed.visual ?? false,
         budget_usd: parsed.budget_usd ?? null,
         max_minutes: parsed.max_minutes ?? null,
+        max_idle_minutes: parsed.max_idle_minutes ?? null,
         auth: parsed.auth ?? { mode: "subscription" },
     };
 }
@@ -247,6 +259,7 @@ async function harnessCheck(args) {
         visual: false,
         budget_usd: null,
         max_minutes: 10,
+        max_idle_minutes: 10,
         auth: gateway ? { mode: "gateway", gateway } : { mode: "subscription" },
     };
     const run = launch(spec);
@@ -303,7 +316,7 @@ COMMANDS
                 [--at SHA]: checkpoint restart - NEW worktree at the commit,
                 NEW session (for escaping stuck or degraded sessions).
                 Overrides: --artifact (replaces inherited list), --visual,
-                --no-visual, --max-minutes, --budget
+                --no-visual, --max-minutes, --max-idle-minutes, --budget
   reap          Cron-safe: mark dead-supervisor runs lost, deliver pending
                 notifications (e.g. */10 * * * * mc reap)
   ls            List runs; also reaps lost runs and re-delivers missed notifications
@@ -324,6 +337,9 @@ RUN OPTIONS
                     exists and is non-empty (repeatable)
   --visual          Output needs human eyes; verdict terminates at needs_human_look
   --max-minutes N   Wall-clock cap: kill + notify when exceeded
+  --max-idle-minutes N
+                    Stall cap: kill when the harness emits nothing on
+                    stdout/stderr for N minutes (default 30; 0 disables)
   --budget N        Dollar cap; refused where no enforceable cost signal exists
   --gateway NAME    Route via an LLM gateway. Known: ${gateways}
   --api-key         Use the conventional API-key env var instead of the resident login
@@ -457,6 +473,7 @@ export async function cliMain(argv) {
                 // (fleet evidence: every artifact-less resume capped below verified).
                 const parentStored = JSON.parse(readFileSync(parent.spec_path, "utf8"));
                 let maxMinutes;
+                let maxIdleMinutes;
                 let budget;
                 let visual;
                 let fresh = false;
@@ -477,12 +494,21 @@ export async function cliMain(argv) {
                             fail(`${arg} must be a finite positive number`);
                         return value;
                     };
+                    const nextNonNegative = () => {
+                        const value = Number(next());
+                        if (!Number.isFinite(value) || value < 0)
+                            fail(`${arg} must be a finite number >= 0 (0 disables)`);
+                        return value;
+                    };
                     switch (arg) {
                         case "--artifact":
                             artifacts.push(next());
                             break;
                         case "--max-minutes":
                             maxMinutes = nextPositive();
+                            break;
+                        case "--max-idle-minutes":
+                            maxIdleMinutes = nextNonNegative();
                             break;
                         case "--budget":
                             budget = nextPositive();
@@ -519,6 +545,7 @@ export async function cliMain(argv) {
                     visual: visual ?? Boolean(parentStored.visual),
                     budget_usd: budget !== undefined ? budget : (parentStored.budget_usd ?? null),
                     max_minutes: maxMinutes !== undefined ? maxMinutes : (parentStored.max_minutes ?? null),
+                    max_idle_minutes: maxIdleMinutes !== undefined ? maxIdleMinutes : (parentStored.max_idle_minutes ?? null),
                     auth: parentStored.auth ?? { mode: "subscription" },
                 }, { parent, fresh, at });
                 console.log(`${run.id}  ${run.title}`);
@@ -563,7 +590,7 @@ export async function cliMain(argv) {
                                 // kimi-code requires a model in every mode; give the probe one so
                                 // it reports credential readiness, not the model requirement.
                                 harness: adapter.name, model: mode === "gateway" || adapter.name === "kimi-code" ? "probe/probe" : null, prompt: "probe",
-                                cwd: null, artifacts: [], visual: false, budget_usd: null, max_minutes: null,
+                                cwd: null, artifacts: [], visual: false, budget_usd: null, max_minutes: null, max_idle_minutes: null,
                                 auth: mode === "gateway" ? { mode, gateway: "openrouter" } : { mode },
                             };
                             const resolved = resolveAuth(spec, adapter, config);
