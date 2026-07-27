@@ -169,6 +169,15 @@ export const claudeCode = {
                 if (update.result_text) {
                     events.push({ kind: "text", payload: { text: update.result_text.slice(0, 2000), final: true } });
                 }
+                if (obj.is_error || (obj.subtype && obj.subtype !== "success")) {
+                    // Surface the failure REASON as a readable harness-error event (the
+                    // other adapters' pattern) - not just a buried boolean in turn_end.
+                    const detail = typeof obj.result === "string" ? `: ${obj.result}` : "";
+                    events.push({
+                        kind: "error",
+                        payload: { note: "harness-error", message: `${obj.subtype ?? "error"}${detail}`.slice(0, 500) },
+                    });
+                }
                 events.push({ kind: "turn_end", payload: { subtype: obj.subtype, is_error: obj.is_error ?? false, num_turns: obj.num_turns } });
                 break;
             }

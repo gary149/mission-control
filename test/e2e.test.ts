@@ -25,6 +25,21 @@ async function waitTerminal(getRun: () => any, timeoutMs = 20000): Promise<any> 
   }
 }
 
+/** notified.json is rewritten per terminal run; poll until it carries this id. */
+async function notifiedFor(id: string, timeoutMs = 5000): Promise<any> {
+  const start = Date.now();
+  for (;;) {
+    try {
+      const payload = JSON.parse(readFileSync(join(home, "notified.json"), "utf8"));
+      if (payload.id === id) return payload;
+    } catch {
+      /* not written yet */
+    }
+    if (Date.now() - start > timeoutMs) throw new Error(`notified.json never carried ${id}`);
+    await sleep(100);
+  }
+}
+
 function baseSpec(overrides: Record<string, unknown>) {
   return {
     harness: "claude-code",
@@ -91,6 +106,8 @@ describe("mission-control e2e (stub harness)", () => {
     for (const expected of ["started", "text", "tool_call", "subagent", "cost_update", "verify_result", "notify_result", "exited"]) {
       assert.ok(kinds.includes(expected), `missing event kind ${expected} in ${kinds}`);
     }
+    // A clean run synthesizes nothing: no error events of any kind.
+    assert.ok(!kinds.includes("error"), `unexpected error events in ${kinds}`);
 
     // Subagent lifecycle (system subtypes) maps to STRUCTURED events, never to
     // errors: the run stayed `verified` above (parser health un-poisoned), and
@@ -125,13 +142,23 @@ describe("mission-control e2e (stub harness)", () => {
 
   test("failing run -> failed + failed_verification, secrets scrubbed from logs", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const run = launch(baseSpec({ prompt: "fail on purpose FAIL LEAK", artifacts: ["out.txt"] }) as never);
     const done = await waitTerminal(() => getRun(run.id));
 
     assert.equal(done.exit, "failed");
     assert.equal(done.verdict, "failed_verification");
+
+    // The failure REASON is a readable harness-error event, not a buried boolean.
+    const err = eventsAfter(run.id, 0).find((e: any) => e.kind === "error" && (e.payload as any)?.note === "harness-error");
+    assert.ok(err, "missing harness-error event for a failed claude-code run");
+    assert.ok(String((err!.payload as any).message).includes("error_during_execution"));
+
+    // ...and the notify payload carries the why, not just the fact.
+    const payload = await notifiedFor(run.id);
+    assert.equal(payload.exit_code, 1);
+    assert.ok(String(payload.error).includes("error_during_execution"));
 
     // The injected key was echoed to stderr by the CLI; the stored log must be scrubbed.
     const stderrLog = readFileSync(done.stderr_path, "utf8");
@@ -299,6 +326,28 @@ describe("mission-control e2e (stub harness)", () => {
     );
   });
 
+  test("pi: harness-reported failure lands failed_verification with a HEALTHY parser", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
+
+    const run = launch(
+      baseSpec({
+        harness: "pi",
+        model: "fake/model",
+        prompt: "fail on purpose FAIL",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "failed");
+    assert.equal(done.verdict, "failed_verification");
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "a cleanly parsed pi failure must not poison parser health");
+    const err = eventsAfter(run.id, 0).find((e: any) => e.kind === "error" && (e.payload as any)?.note === "harness-error");
+    assert.ok(err, "missing harness-error event for a failed pi run");
+  });
+
   test("pi: api_key mode refused with an honest rationale", async () => {
     const { launch } = await import("../src/core/launch.ts");
     assert.throws(
@@ -364,6 +413,15 @@ describe("mission-control e2e (stub harness)", () => {
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "failed");
     assert.equal(done.verdict, "failed_verification");
+
+    // Empty stdout means no harness-error event - the supervisor synthesizes
+    // the reason from the scrubbed stderr tail so the failure is not silent.
+    const { eventsAfter } = await import("../src/core/db.ts");
+    const tail = eventsAfter(run.id, 0).find((e: any) => e.kind === "error" && (e.payload as any)?.note === "stderr-tail");
+    assert.ok(tail, "missing synthesized stderr-tail event");
+    assert.ok(String((tail!.payload as any).excerpt).includes("simulated failure"));
+    const payload = await notifiedFor(run.id);
+    assert.ok(String(payload.error).includes("simulated failure"));
   });
 
   test("kimi-code: native resume via --session continues the same session", async () => {
