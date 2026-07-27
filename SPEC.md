@@ -58,7 +58,7 @@ Hetzner box, plus deep reads of openclaw, omnigent, nanoclaw, pi-mono, agentsvie
 | 5 | Verification | Two-axis status: `exit` x `verdict`; DONE = succeeded AND verified |
 | 6 | Remote | Install per host; engine is SSH-free; driven via plain `ssh box mc ...` with specs over stdin (revised 2026-07-20, was: `--host` SSH sugar in mc) |
 | 7 | Notifications | Generic per-host `on_terminal` hook (exec and/or webhook); Telegram example config |
-| 8 | Follow-ups | `mc resume` = new run linked by `parent_run_id`, harness-native resume, capability-gated; inherits the parent's artifacts/visual/caps unless overridden (a continuation that silently drops its declared checks stops being verifiable) |
+| 8 | Follow-ups | `mc resume` = new run linked by `parent_run_id`, harness-native resume, capability-gated; inherits the parent's artifacts/visual/caps unless overridden (a continuation that silently drops its declared checks stops being verifiable). `mc resume --fresh [--at SHA]` = checkpoint restart: NEW worktree at a commit of the parent's repo, NEW session (for escaping stuck/degraded sessions); needs no resume capability. Same lineage either way |
 | 9 | agentsview | Loose coupling: converge on conventions, store `session_id`, zero dependency |
 | 10 | V1 adapters | claude-code, codex, pi (one per integration style: stream-json, exec-json, RPC) |
 | 11 | Cost | Always record (unknown, never 0, when unparseable); opt-in per-run `--budget` kill; no global policy |
@@ -199,7 +199,11 @@ runbook knowledge currently scattered across skill files, made executable:
   raise `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` (headless background waits die at a
   hardcoded 10-minute ceiling with only a buried stderr line); disable the auto-updater
   for the run's child (`DISABLE_AUTOUPDATER=1`) — binary relocation mid-run broke the old
-  delegation stack twice.
+  delegation stack twice. In-session wakeup timers are NOT durable under `-p`: the
+  process ends at end_turn and scheduled wakeups die with it, so a lead that ends its
+  turn "expecting to be woken" silently stalls (documented live incident). Continuation
+  is driven from OUTSIDE the session — notify hook → orchestrator → `mc resume` — never
+  from inside it.
 - **codex**: `exec --json` with the sandbox/approval flags resolved from the spec
   (`--yolo` only inside mc's isolated worktree), `model_reasoning_effort` mapped from
   `--effort`; task context injected via `AGENTS.md` in the workdir (codex's native
@@ -435,7 +439,11 @@ mc ls     [--json]
 mc show   <run-id>            # full record, both axes, verify evidence, cost
 mc tail   <run-id>            # follow the event stream
 mc kill   <run-id>
-mc resume <run-id> "follow-up"   # new linked run; errors if harness can't resume
+mc resume <run-id> [--fresh [--at SHA]] "follow-up"
+                              # new linked run inheriting the parent's spec; default =
+                              # native session resume, --fresh = checkpoint restart
+mc reap                       # cron-safe: mark dead-supervisor runs lost, deliver
+                              # pending notifications (push must not depend on `mc ls`)
 mc harness ls                 # adapters + capabilities + detection (installed? path? version?)
 mc harness check <name>       # live end-to-end check of one adapter against the real CLI
 mc cost   [--since 7d]        # per-run and aggregate spend from the ledger

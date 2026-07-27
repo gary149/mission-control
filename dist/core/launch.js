@@ -10,7 +10,7 @@ import { loadConfig, runDir } from "./config.js";
 import { getRun, insertEvent, insertRun, updateRun } from "./db.js";
 import { PreflightError } from "./types.js";
 import { artifactStaysInside } from "./verify.js";
-import { createWorkdir } from "./workspace.js";
+import { createWorkdir, createWorkdirFromCheckpoint } from "./workspace.js";
 function newRunId() {
     for (let attempt = 0; attempt < 10; attempt++) {
         const id = randomBytes(3).toString("hex");
@@ -41,14 +41,18 @@ export function launch(spec, options = {}) {
         }
     }
     if (parent) {
-        if (adapter.capabilities.resume !== "native") {
-            throw new PreflightError(`harness "${adapter.name}" declares resume: "${adapter.capabilities.resume}" - it cannot continue a session (never silently starts fresh)`);
-        }
-        if (!parent.session_id) {
-            throw new PreflightError(`run ${parent.id} has no session reference to resume (its stream never yielded one - see mc show ${parent.id})`);
-        }
         if (parent.harness !== spec.harness) {
             throw new PreflightError(`cannot resume a ${parent.harness} run with harness ${spec.harness}`);
+        }
+        // --fresh starts a NEW session by design, so it needs neither native
+        // resume capability nor a captured session id.
+        if (!options.fresh) {
+            if (adapter.capabilities.resume !== "native") {
+                throw new PreflightError(`harness "${adapter.name}" declares resume: "${adapter.capabilities.resume}" - it cannot continue a session (never silently starts fresh)`);
+            }
+            if (!parent.session_id) {
+                throw new PreflightError(`run ${parent.id} has no session reference to resume (its stream never yielded one - see mc show ${parent.id})`);
+            }
         }
     }
     const auth = resolveAuth(spec, adapter, config);
@@ -60,14 +64,25 @@ export function launch(spec, options = {}) {
     }
     const id = newRunId();
     const title = deriveTitle(spec.prompt); // before any disk effects: a bad prompt must not orphan a workdir
-    // Resume continues in the PARENT's workdir: same worktree, same artifacts,
-    // same harness-native session store next to it.
+    // Native resume continues in the PARENT's workdir: same worktree, same
+    // artifacts, same harness-native session store next to it. A --fresh
+    // restart instead gets a NEW worktree at the checkpoint commit.
     let workdir;
     let isGit;
+    let checkpoint;
     if (parent) {
         const parentStored = JSON.parse(readFileSync(parent.spec_path, "utf8"));
-        workdir = parent.workdir;
-        isGit = Boolean(parentStored.is_git);
+        if (options.fresh) {
+            if (!parentStored.is_git) {
+                throw new PreflightError(`run ${parent.id} has no git workdir; --fresh restarts continue from a checkpoint commit (nothing to restart from in a plain directory)`);
+            }
+            ({ workdir, checkpoint } = createWorkdirFromCheckpoint(id, parent.workdir, options.at ?? null));
+            isGit = true;
+        }
+        else {
+            workdir = parent.workdir;
+            isGit = Boolean(parentStored.is_git);
+        }
     }
     else {
         ({ workdir, isGit } = createWorkdir(id, spec.cwd));
@@ -86,7 +101,8 @@ export function launch(spec, options = {}) {
         ...spec,
         is_git: isGit,
         bin: detection.path,
-        resume_session_id: parent?.session_id ?? undefined,
+        resume_session_id: options.fresh ? undefined : (parent?.session_id ?? undefined),
+        checkpoint,
         git_head_at_launch: gitHeadAtLaunch ?? undefined,
     }, null, 2));
     const run = {

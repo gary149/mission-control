@@ -281,8 +281,13 @@ USAGE
 
 COMMANDS
   run           Launch a tracked, isolated, verified run on a harness
-  resume <id>   Continue a run's harness session with a follow-up prompt: a new
-                linked run in the SAME workdir (inherits harness/model/auth)
+  resume <id>   Continue a run with a follow-up prompt: a new linked run that
+                inherits harness/model/auth/artifacts/visual/caps. Default:
+                native session resume in the SAME workdir. With --fresh
+                [--at SHA]: checkpoint restart - NEW worktree at the commit,
+                NEW session (for escaping stuck or degraded sessions)
+  reap          Cron-safe: mark dead-supervisor runs lost, deliver pending
+                notifications (e.g. */10 * * * * mc reap)
   ls            List runs; also reaps lost runs and re-delivers missed notifications
   show <id>     Full run record, verification evidence, recent events
   tail <id>     Follow a run's event stream until it terminates
@@ -440,6 +445,8 @@ export async function cliMain(argv: string[]): Promise<void> {
         let maxMinutes: number | null | undefined;
         let budget: number | null | undefined;
         let visual: boolean | undefined;
+        let fresh = false;
+        let at: string | undefined;
         const artifacts: string[] = [];
         const positional: string[] = [];
         for (let i = 1; i < args.length; i++) {
@@ -460,11 +467,14 @@ export async function cliMain(argv: string[]): Promise<void> {
             case "--budget": budget = nextPositive(); break;
             case "--visual": visual = true; break;
             case "--no-visual": visual = false; break;
+            case "--fresh": fresh = true; break;
+            case "--at": at = next(); break;
             default:
               if (arg.startsWith("--")) fail(`unknown flag ${arg} (resume inherits spec fields from the parent)`);
               positional.push(arg);
           }
         }
+        if (at && !fresh) fail("--at requires --fresh (a native resume continues the session where it is)");
         const prompt = positional.join(" ").trim();
         if (!prompt) fail("a follow-up prompt is required");
         const run = launch(
@@ -479,11 +489,28 @@ export async function cliMain(argv: string[]): Promise<void> {
             max_minutes: maxMinutes !== undefined ? maxMinutes : (parentStored.max_minutes ?? null),
             auth: parentStored.auth ?? { mode: "subscription" },
           },
-          { parent },
+          { parent, fresh, at },
         );
         console.log(`${run.id}  ${run.title}`);
-        console.log(`    resumes ${parent.id} (session ${parent.session_id}) in ${run.workdir}`);
+        if (fresh) {
+          console.log(`    fresh restart of ${parent.id} from checkpoint${at ? ` ${at}` : " (parent HEAD)"} in ${run.workdir}`);
+        } else {
+          console.log(`    resumes ${parent.id} (session ${parent.session_id}) in ${run.workdir}`);
+        }
         console.log(`    mc tail ${run.id}   # follow`);
+        break;
+      }
+
+      case "reap": {
+        // Cron-safe lost-run detection + at-least-once notification delivery:
+        // the push half of the system must not depend on anyone running `mc ls`.
+        const before = listRuns();
+        const activeIds = new Set(before.filter(isActive).map((r) => r.id));
+        const unnotified = new Set(before.filter((r) => !isActive(r) && !r.notified).map((r) => r.id));
+        const after = await reapLostRuns(before);
+        const lost = after.filter((r) => r.exit === "lost" && activeIds.has(r.id)).length;
+        const delivered = after.filter((r) => r.notified && (unnotified.has(r.id) || (activeIds.has(r.id) && r.exit === "lost"))).length;
+        console.log(`reaped ${lost} lost run(s), delivered ${delivered} pending notification(s)`);
         break;
       }
 
