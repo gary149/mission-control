@@ -32,7 +32,7 @@ delegate to.
 **Ask your agent:**
 
 ```text
-Use mission-control: build a playable browser FPS on claude-code with kimi-k3 via openrouter, ping me when verified.
+Use mission control to build a playable browser FPS on claude code with kimi-k3 via openrouter, ping me when verified.
 ```
 
 **Or directly:**
