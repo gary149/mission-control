@@ -51,6 +51,14 @@ export async function notifyTerminal(run, config) {
             const p = err.payload;
             errorExcerpt = String(p.message ?? p.excerpt ?? p.detail ?? p.raw ?? "").slice(0, 300) || null;
         }
+        else {
+            // A `lost` run has no error-kind event - its supervisor died before one
+            // could be emitted. Reap records why on the exited event's `note`; surface
+            // it so an abandoned run's push still explains itself, not just "lost".
+            const note = exited?.payload?.note;
+            if (note)
+                errorExcerpt = String(note).slice(0, 300);
+        }
     }
     const payload = JSON.stringify({
         id: run.id,
