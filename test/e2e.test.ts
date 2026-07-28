@@ -1456,6 +1456,62 @@ describe("mission-control e2e (stub harness)", () => {
     };
   }
 
+  test("mc ls shows TOKENS/DURATION columns; mc show prints a cost/tokens/duration summary", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "tok00001";
+    const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+    const endedAt = new Date().toISOString();
+    insertRun(
+      placeholderRun(id, {
+        started_at: startedAt,
+        ended_at: endedAt,
+        cost_usd: 0.79,
+        cost_basis: "metered",
+        tokens_in: 73_000,
+        tokens_out: 5_700,
+        // Terminal (succeeded, from placeholderRun's default) and unnotified
+        // would otherwise sit in the DB as a leftover `mc reap` picks up in a
+        // later test (see the epipe test's own comment on this exact trap) -
+        // this test doesn't exercise notify, so mark it already-delivered.
+        notified: true,
+      }) as never,
+    );
+
+    const ls = spawnSync(process.execPath, [entry, "ls"], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(ls.status, 0, ls.stderr);
+    assert.ok(ls.stdout.includes("TOKENS"), ls.stdout);
+    assert.ok(ls.stdout.includes("DURATION"), ls.stdout);
+    assert.ok(ls.stdout.includes("73k/6k"), ls.stdout); // 5700 rounds to 6k
+    assert.ok(ls.stdout.includes("5m"), ls.stdout);
+
+    const show = spawnSync(process.execPath, [entry, "show", id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(show.status, 0, show.stderr);
+    assert.ok(show.stdout.includes("cost=$0.79  tokens=73k/6k  duration=5m"), show.stdout);
+
+    // A run genuinely still running (no ended_at yet) degrades tokens/duration
+    // to "-", never a crash or a misleading number for a run that hasn't
+    // reported anything yet. pid=own test process so reapLostRuns (which `ls`
+    // calls) sees a live watcher and leaves it running instead of reaping it.
+    const bareId = "tok00002";
+    insertRun(
+      placeholderRun(bareId, {
+        ended_at: null,
+        exit: "running",
+        verdict: "pending",
+        pid: process.pid,
+        supervisor_pid: process.pid,
+        notified: true,
+      }) as never,
+    );
+    const lsBare = spawnSync(process.execPath, [entry, "ls"], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(lsBare.status, 0, lsBare.stderr);
+    const bareLine = lsBare.stdout.split("\n").find((l) => l.includes(bareId));
+    assert.ok(bareLine, lsBare.stdout);
+    assert.match(bareLine!, /running\s+pending\s+-\s+-\s+-\s+\d+s\s*$/); // COST/TOKENS/DURATION all "-", AGE last
+  });
+
   test("notify hook that never reads stdin does not crash mc reap; read commands stay side-effect free", async () => {
     const { insertRun, getRun, eventsAfter, updateRun } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
