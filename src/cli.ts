@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -31,6 +32,117 @@ function pidAlive(pid: number | null): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Signal the harness's whole process GROUP (it's spawned `detached: true` by
+ * the supervisor, making it a group leader) so descendants die too, not just
+ * the recorded pid. Falls back to signalling the bare pid if the group is
+ * already gone or unavailable (e.g. a pid whose group predates this fix, or
+ * a process that was never a group leader). Returns which path landed -
+ * callers escalating a SIGTERM need to know, because the two paths require
+ * different liveness checks afterward (see killWithEscalation).
+ */
+function killGroupOrPid(pid: number, signal: NodeJS.Signals): "group" | "bare" {
+  try {
+    process.kill(-pid, signal);
+    return "group";
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      /* already gone */
+    }
+    return "bare";
+  }
+}
+
+/**
+ * Whether the harness's process GROUP still has any member alive - checked
+ * via signal 0 against the negative pid, which throws ESRCH only once every
+ * process in the group is gone. Deliberately broader than checking the
+ * leader pid alone: if the harness exits on SIGTERM but a descendant it
+ * spawned ignores it, the leader pid disappears (a plain `pidAlive` check
+ * would read "dead" and skip SIGKILL) while the group - and a
+ * pipe-holding descendant that can block the supervisor's close event -
+ * survives. Escalation must track the group, not the leader.
+ */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `mc kill` is a short-lived CLI invocation, not a resident watcher, so the
+ * SIGTERM-then-SIGKILL escalation happens inline here rather than being
+ * scheduled and left to outlive the process: send SIGTERM, poll liveness for
+ * up to `timeoutMs`, then SIGKILL if it's still standing.
+ *
+ * WHICH liveness check to poll depends on which path the SIGTERM actually
+ * took. The normal case (detached:true group leader) sends a real group
+ * signal, so the GROUP is what has to disappear - poll `groupAlive`. But
+ * when `killGroupOrPid` had to fall back to a bare-pid signal (no such
+ * process group exists - e.g. a run launched before the detached:true fix,
+ * or a pid that was never a group leader), `process.kill(-pid, 0)` throws
+ * ESRCH immediately regardless of whether the process itself is still
+ * alive: polling `groupAlive` there would read "dead" on the very first
+ * check and skip SIGKILL entirely for a process that's actively ignoring
+ * SIGTERM. Track the path from the initial signal and poll - and escalate
+ * SIGKILL via - the matching check in both branches.
+ */
+async function killWithEscalation(pid: number, timeoutMs = 10_000): Promise<void> {
+  const path = killGroupOrPid(pid, "SIGTERM");
+  const alive = () => (path === "group" ? groupAlive(pid) : pidAlive(pid));
+  const start = Date.now();
+  while (alive() && Date.now() - start < timeoutMs) {
+    await sleep(250);
+  }
+  if (alive()) killGroupOrPid(pid, "SIGKILL");
+}
+
+/** Live process start time - see supervisor.ts's matching `pidStart` for why `ps -o lstart=`. */
+function pidStart(pid: number): string | null {
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+  const out = result.stdout.trim();
+  return out || null;
+}
+
+/**
+ * The harness pid's start time as the supervisor recorded it at spawn (the
+ * `pid_start` field on its initial `status_change` event - see
+ * supervisor.ts). Scans rather than indexes: this is a once-per-kill,
+ * bounded-size read, consistent with how `show`/`tail` already walk a run's
+ * event stream.
+ */
+function recordedPidStart(runId: string, pid: number): string | null {
+  for (const event of eventsAfter(runId, 0)) {
+    if (event.kind !== "status_change") continue;
+    const payload = event.payload as { pid?: number; pid_start?: string | null };
+    if (payload.pid === pid && typeof payload.pid_start === "string") return payload.pid_start;
+  }
+  return null;
+}
+
+/**
+ * Authoritative identity check before signalling a run whose supervisor is
+ * NOT confirmably alive (a `lost` row, including one just reaped from
+ * `running` - see the `kill` handler). A pid can be reused - by an
+ * unrelated process, or by a DIFFERENT concurrent run of the SAME harness
+ * binary, which a command-line match cannot tell apart. Process start time
+ * is per-instance and authoritative: it's assigned once, at fork, and
+ * nothing short of the same process can produce it again. Fails SAFE - a
+ * missing recorded value, a vanished live process, or any mismatch all
+ * refuse rather than risk signalling the wrong process.
+ */
+function looksLikeOwnedProcess(run: Run): boolean {
+  if (!run.pid) return false;
+  const recorded = recordedPidStart(run.id, run.pid);
+  if (!recorded) return false;
+  return pidStart(run.pid) === recorded;
 }
 
 const QUEUED_GRACE_MS = 15_000;
@@ -435,17 +547,34 @@ export async function cliMain(argv: string[]): Promise<void> {
       }
 
       case "kill": {
-        const run = requireRun(args[0]);
-        if (run.exit !== "running") fail(`run ${run.id} is not running (exit=${run.exit})`);
-        // Request only - the run stays `running` until the supervisor observes
-        // the process actually die (close signal) and writes the terminal row.
+        const requested = requireRun(args[0]);
+        // Reap first: a `running` row whose supervisor has already died is
+        // exactly the case the ownership check below exists for (nobody's
+        // confirmed this pid still belongs to this run), and reaping is
+        // what turns it into `lost` - so the same check path covers both a
+        // stale `running` row and a genuinely long-lost one.
+        const run = (await reapLostRuns([requested]))[0]!;
+        // Gate on the harness pid actually being alive, not on exit==="running":
+        // a `lost` run (dead supervisor, live harness) is exactly the case
+        // nobody else can signal, so it must stay killable through mc.
+        const alive = pidAlive(run.pid);
+        if (run.exit !== "running" && !(run.exit === "lost" && alive)) {
+          fail(`run ${run.id} is not killable (exit=${run.exit}${run.pid ? `, harness pid ${run.pid} ${alive ? "alive" : "already dead"}` : ", no pid recorded"})`);
+        }
+        // A `lost` row can persist indefinitely before anyone runs `mc kill`
+        // on it, so its recorded pid may since have been reused - by an
+        // unrelated process, or by a different concurrent run of the same
+        // harness. Refuse rather than risk signalling the wrong process.
+        if (run.exit === "lost" && run.pid && !looksLikeOwnedProcess(run)) {
+          fail(`pid ${run.pid} is not run ${run.id}'s harness (start time mismatch, PID reuse); refusing`);
+        }
+        // Durable intent BEFORE signalling: even if the harness traps SIGTERM
+        // and exits 0, or the escalation below has to wait out the full
+        // timeout, this event is already on the ledger so a killed run is
+        // never mislabeled succeeded.
         insertEvent(run.id, "status_change", { kill_requested: true, by: "mc kill" });
         if (run.pid) {
-          try {
-            process.kill(run.pid, "SIGTERM");
-          } catch {
-            /* already gone; reap on next ls */
-          }
+          await killWithEscalation(run.pid);
         }
         console.log(`kill requested for ${run.id} (mc tail ${run.id} to watch it land)`);
         break;
