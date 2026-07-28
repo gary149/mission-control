@@ -97,8 +97,9 @@ harness goes silent past `--max-idle-minutes` (default 30) is killed as a stall.
 
 ## Notifications
 
-One push per finished run, carrying both `exit` and `verdict` - and, when a run fails,
-its `exit_code` and the error reason, so you learn why without digging through logs:
+One push per finished run, carrying both `exit` and `verdict` - and, when a run doesn't
+succeed, the reason it ended (exit code, budget cap, harness error, or a dead
+supervisor), so you learn why without digging through logs:
 
 ```toml
 # ~/.mission-control/config.toml
