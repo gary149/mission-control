@@ -506,6 +506,10 @@ FILES & ENV
     runs/<id>/              spec.json, work/, stdout.jsonl, stderr.log
     config.toml             [notify] exec/webhook hooks; [gateway.NAME] blocks
   MC_CLAUDE_BIN             override the claude binary path (pinning/testing)
+  MC_DETECT_TIMEOUT_MS      wall-clock budget for each harness's --version
+                            probe (default 10000; raise it if detect()/
+                            harness ls falsely reports a slow-but-working
+                            CLI as not installed)
 
 EXAMPLES
   mc run --harness claude-code --artifact out/report.md "write the report"

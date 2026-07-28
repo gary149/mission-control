@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { detectTimeoutMs } from "./detect-timeout.ts";
 import type { HarnessAdapter, Detection, LaunchContext, MappedLine } from "./types.ts";
 
 function resolveBin(): string | null {
@@ -26,7 +27,7 @@ export const claudeCode: HarnessAdapter = {
     if (!path) return { installed: false };
     // A resolved path is not enough: a stale MC_CLAUDE_BIN, a non-executable
     // file, or a broken wrapper must not report ready.
-    const v = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 10_000 });
+    const v = spawnSync(path, ["--version"], { encoding: "utf8", timeout: detectTimeoutMs() });
     const runnable = v.status === 0 && !v.error;
     return { installed: runnable, path, version: v.stdout?.trim() || undefined };
   },
