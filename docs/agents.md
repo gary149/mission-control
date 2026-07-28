@@ -30,12 +30,18 @@ trying to turn it into `verified` - it will never happen. Hand it to the human.
 
 ## Reading results
 
-- Machine-read the ledger: `mc ls --json`, `mc show <id>`. Never parse the human table -
-  it is for humans and it will change.
+- Machine-read the ledger: `mc ls --json` is the clean JSON interface, and the SQLite
+  db (below) is always there. `mc show <id>` is for inspection - a JSON record followed
+  by human-formatted summary lines - so do not pipe it to a JSON parser. Never parse
+  the human table either; it is for humans and it will change.
 - **Read `verify_evidence` check by check before discarding a run.** A `killed` run
   whose artifact checks all pass is salvage, not garbage: the work exists in its
-  workdir right now, and `mc resume` continues from it. Restarting from scratch pays
-  the whole cost again to rebuild what you already have.
+  workdir right now. If the record has a `session_id`, `mc resume <id>` continues in
+  that same workdir. If it does not (a mid-run kill can land before some harnesses
+  yield their session reference), the outputs are still on disk in `runs/<id>/work` -
+  integrate them directly, or restart from the last committed checkpoint with
+  `mc resume <id> --fresh --at <sha>`, which needs no session. Restarting from scratch
+  pays the whole cost again to rebuild what you already have.
 - **Triage `error` events before any retry.** The payload tells you whether retrying
   can even help. An auth/quota failure (e.g. `403 Key limit exceeded`) fails every
   future run identically: stop launching, alert the operator, back off. Retrying into
