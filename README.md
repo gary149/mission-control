@@ -57,15 +57,16 @@ mc run --harness claude-code --max-minutes 360 --artifact index.html \
   "build a playable browser FPS in a single index.html: pointer-lock aim, WASD, targets that fall when shot"
 ```
 
-Yes, really - give it the afternoon and close the laptop. Each run executes in an
-isolated workdir, and `verified` means mc mechanically checked the declared artifact
-exists with real content - not that the agent claimed success.
+Yes, really - give it the afternoon and close the laptop. Each run executes in its own
+git worktree (collision isolation between runs, not an OS sandbox - the agent runs
+full-auto), and `verified` means mc mechanically checked the declared artifact exists as
+a non-empty regular file - not that the agent claimed success.
 
 ## Commands
 
 ```sh
 mc run --harness H [--model M] [--gateway openrouter] [--budget 99] \
-       [--max-minutes 360] [--artifact PATH] [--visual] "task"
+       [--max-minutes 360] [--max-idle-minutes 30] [--artifact PATH] [--visual] "task"
 mc ls                        # every run: exit + verdict + cost, at a glance
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
 mc show <id>                 # full record + verification evidence
@@ -86,16 +87,19 @@ host, any OpenRouter model runs through any harness:
 
 ```sh
 mc run --harness opencode --gateway openrouter --model moonshotai/kimi-k3 \
-  --budget 99 --artifact app.py "build the thing"   # --budget 99 = hard cap at $99 of spend
+  --budget 99 --artifact app.py "build the thing"   # kill when spend crosses $99
 ```
 
 Where the harness reports real metered cost (`opencode`, `pi`), `--budget` (USD) kills
-the run mid-flight the moment accumulated spend crosses the cap. Everywhere else use
-`--max-minutes`.
+the run the moment accumulated spend crosses the cap (checked between turns, so it can
+overshoot by one turn). Everywhere else use `--max-minutes`. Either way, a run whose
+harness goes silent past `--max-idle-minutes` (default 30) is killed as a stall.
 
 ## Notifications
 
-One push per finished run, carrying both `exit` and `verdict`:
+One push per finished run, carrying both `exit` and `verdict` - and, when a run doesn't
+succeed, the reason it ended (exit code, budget cap, harness error, or a dead
+supervisor), so you learn why without digging through logs:
 
 ```toml
 # ~/.mission-control/config.toml

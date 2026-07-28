@@ -1202,6 +1202,11 @@ describe("mission-control e2e (stub harness)", () => {
     const reaped = getRun(id)!;
     assert.equal(reaped.exit, "lost");
     assert.equal(reaped.notified, true);
+    // A lost run has no error-kind event; its push must still explain WHY,
+    // carrying the reason reap recorded on the exited event (not error: null).
+    const payload = JSON.parse(readFileSync(join(home, "notified.json"), "utf8"));
+    assert.equal(payload.id, id);
+    assert.ok(String(payload.error).includes("watcher died"), `lost notify should carry its reason, got: ${payload.error}`);
   });
 
   test("mc kill: SIGTERM escalates and no orphaned harness process is left behind", async () => {
