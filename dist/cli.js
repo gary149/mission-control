@@ -540,7 +540,11 @@ EXAMPLES
   mc run --harness claude-code --gateway openrouter --model moonshotai/kimi-k3 \\
         --max-minutes 30 --artifact hello.txt "build hello.txt"
   mc ls --json | jq '.[0].verdict'
-  mc harness ls`);
+  mc harness ls
+
+FOR AGENTS
+  Driving mc as an orchestrating agent? Read the operating guide first:
+  https://raw.githubusercontent.com/gary149/mission-control/main/docs/agents.md`);
 }
 export async function cliMain(argv) {
     if (argv.includes("--help") || argv.includes("-h")) {
