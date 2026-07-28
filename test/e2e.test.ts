@@ -842,6 +842,31 @@ describe("mission-control e2e (stub harness)", () => {
     }
   });
 
+  test("detect() --version probe timeout: MC_DETECT_TIMEOUT_MS overrides the 10s default, invalid values fall back", async () => {
+    const { detectTimeoutMs } = await import("../src/core/adapters/detect-timeout.ts");
+    const original = process.env.MC_DETECT_TIMEOUT_MS;
+    try {
+      delete process.env.MC_DETECT_TIMEOUT_MS;
+      assert.equal(detectTimeoutMs(), 10_000);
+
+      process.env.MC_DETECT_TIMEOUT_MS = "30000";
+      assert.equal(detectTimeoutMs(), 30_000);
+
+      // Fail-safe: a malformed or non-positive override must not disable the
+      // probe outright (e.g. 0 or NaN would make every detect() call fail
+      // instantly) - fall back to the default instead.
+      process.env.MC_DETECT_TIMEOUT_MS = "not-a-number";
+      assert.equal(detectTimeoutMs(), 10_000);
+      process.env.MC_DETECT_TIMEOUT_MS = "-5";
+      assert.equal(detectTimeoutMs(), 10_000);
+      process.env.MC_DETECT_TIMEOUT_MS = "0";
+      assert.equal(detectTimeoutMs(), 10_000);
+    } finally {
+      if (original === undefined) delete process.env.MC_DETECT_TIMEOUT_MS;
+      else process.env.MC_DETECT_TIMEOUT_MS = original;
+    }
+  });
+
   test("preflight refuses unknown gateway and non-prefixed model", async () => {
     const { launch } = await import("../src/core/launch.ts");
 
