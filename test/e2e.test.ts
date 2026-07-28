@@ -1,6 +1,6 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,52 @@ async function waitTerminal(getRun: () => any, timeoutMs = 20000): Promise<any> 
     if (Date.now() - start > timeoutMs) throw new Error(`run did not terminate: ${JSON.stringify(run)}`);
     await sleep(200);
   }
+}
+
+/** Poll until the supervisor has spawned the harness and recorded its pid. */
+async function waitRunning(getRun: () => any, timeoutMs = 10000): Promise<any> {
+  const start = Date.now();
+  for (;;) {
+    const run = getRun();
+    if (run && run.exit === "running" && run.pid) return run;
+    if (Date.now() - start > timeoutMs) throw new Error(`run never reached running with a pid: ${JSON.stringify(run)}`);
+    await sleep(100);
+  }
+}
+
+/** Mirrors cli.ts's pidAlive (not exported); used by tests to assert no orphan survives a kill. */
+function pidAlive(pid: number | null | undefined): boolean {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Mirrors supervisor.ts/cli.ts's pidStart (not exported); used to fabricate a matching (or deliberately mismatched) `pid_start`. */
+function psLstart(pid: number): string {
+  return spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+}
+
+/**
+ * Run `mc <args>` asynchronously (not spawnSync). When a test is itself the
+ * parent of a fabricated orphan process (see the "lost-but-alive" kill test),
+ * spawnSync blocks this process's whole event loop for as long as the child
+ * runs, which prevents it from reaping the orphan's zombie once the group
+ * signal lands - a self-inflicted artifact of the test harness, not
+ * something a real caller (an unrelated shell/orchestrator) ever hits.
+ */
+function runMc(entry: string, args: string[]): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [entry, ...args], { env: { ...process.env } });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d));
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 
 /** notified.json is rewritten per terminal run; poll until it carries this id. */
@@ -1131,6 +1177,216 @@ describe("mission-control e2e (stub harness)", () => {
     const reaped = getRun(id)!;
     assert.equal(reaped.exit, "lost");
     assert.equal(reaped.notified, true);
+  });
+
+  test("mc kill: SIGTERM escalates and no orphaned harness process is left behind", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // Long enough that without a working kill this test's own timeout would
+    // fire first - the escalation, not the fixture exiting on its own, is
+    // what has to end this run.
+    const run = launch(baseSpec({ prompt: "hang silently SLEEP:60000", artifacts: ["out.txt"] }) as never);
+    const running = await waitRunning(() => getRun(run.id));
+    assert.ok(running.pid! > 0);
+    assert.ok(pidAlive(running.pid), "harness pid should be alive before kill");
+
+    const res = spawnSync(process.execPath, [entry, "kill", run.id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.ok(res.stdout.includes("kill requested"), res.stdout);
+
+    const done = await waitTerminal(() => getRun(run.id), 15000);
+    assert.equal(done.exit, "killed");
+    // The whole point of process-group containment: the harness pid is
+    // actually dead, not just marked killed in the ledger.
+    assert.equal(pidAlive(done.pid), false, `pid ${done.pid} still alive after mc kill`);
+  });
+
+  test("mc kill: a lost-but-alive run (dead supervisor, live harness) is now killable", async () => {
+    const { insertRun, insertEvent, eventsAfter } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // Fabricate exactly the case the old hard `exit === "running"` guard could
+    // never reach: a dead supervisor (no watcher pid alive) with a real, live,
+    // detached (process-group-leader) harness still running unwatched.
+    const workdir = join(home, "lost-none");
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    orphan.unref();
+    await sleep(200); // give it a moment to actually be running
+
+    const id = "l0st001";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "orphaned harness", title: "orphaned harness", spec_path: join(home, "lost-none.json"),
+      workdir, session_id: null, exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: orphan.pid, supervisor_pid: 999_999_998, stderr_path: join(home, "lost-none.log"),
+      // notified: true - a lost run that's been DETECTED (which fabricating
+      // exit: "lost" directly simulates) would already have had its
+      // notification delivered by the reap that marked it lost; leaving this
+      // false would make an unrelated `mc reap` sweep it and double-fire hooks.
+      artifacts: [], verify_evidence: null, notified: true,
+    } as never);
+    // The ownership check (start-time identity) needs a recorded `pid_start`
+    // to compare against - this is what supervisor.ts writes at real spawn
+    // time; fabricate the same event here since this row bypassed supervise().
+    insertEvent(id, "status_change", {
+      exit: "running", pid: orphan.pid, supervisor_pid: 999_999_998, pid_start: psLstart(orphan.pid!),
+    });
+
+    assert.ok(pidAlive(orphan.pid), "sanity: orphan must be alive before mc kill runs");
+
+    // Async, not spawnSync: this test is itself the orphan's parent, and a
+    // synchronous spawn would block this process from reaping it - see runMc.
+    const res = await runMc(entry, ["kill", id]);
+    // The old code: `if (run.exit !== "running") fail(...)` - a "lost" row was
+    // unconditionally refused here, even with a live pid. This must now work.
+    assert.equal(res.status, 0, res.stderr);
+
+    // mc kill's own escalation already waited this out; poll a little more for CI slack.
+    const start = Date.now();
+    while (pidAlive(orphan.pid) && Date.now() - start < 15000) await sleep(200);
+    assert.equal(pidAlive(orphan.pid), false, `orphaned harness pid ${orphan.pid} still alive after mc kill`);
+
+    const killRequested = eventsAfter(id, 0).find(
+      (e: any) => e.kind === "status_change" && (e.payload as any)?.kill_requested,
+    );
+    assert.ok(killRequested, "kill_requested event missing for the lost-but-alive run");
+  });
+
+  test("mc kill: refuses a lost run whose pid now belongs to an unrelated process (possible PID reuse)", async () => {
+    const { insertRun, insertEvent, eventsAfter } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // A real, live process standing in for "the recorded pid got reused by
+    // something else" (or by a different concurrent run of the SAME harness
+    // binary - a command-line match alone couldn't tell those apart, which
+    // is exactly why the ownership check is start-time identity, not a
+    // command-line substring match).
+    const stranger = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    stranger.unref();
+    await sleep(200);
+
+    const id = "reuse01";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "stale lost row", title: "stale lost row", spec_path: join(home, "reuse-none.json"),
+      workdir: join(home, "reuse-none-workdir"), session_id: null, exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 3_600_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: stranger.pid, supervisor_pid: 999_999_994, stderr_path: join(home, "reuse-none.log"),
+      artifacts: [], verify_evidence: null, notified: true,
+    } as never);
+    // The recorded start time is from "the original harness" this pid used
+    // to belong to - deliberately NOT the stand-in process's real start
+    // time, simulating the pid having been reused since.
+    insertEvent(id, "status_change", {
+      exit: "running", pid: stranger.pid, supervisor_pid: 999_999_994,
+      pid_start: "Thu Jan  1 00:00:00 1970",
+    });
+
+    try {
+      assert.ok(pidAlive(stranger.pid), "sanity: the stand-in process must be alive before mc kill runs");
+      assert.notEqual(psLstart(stranger.pid!), "Thu Jan  1 00:00:00 1970", "sanity: the fabricated start time must not coincide with reality");
+
+      const res = await runMc(entry, ["kill", id]);
+      assert.equal(res.status, 1);
+      assert.ok(res.stderr.includes("start time mismatch"), res.stderr);
+      assert.ok(res.stderr.includes("PID reuse"), res.stderr);
+      assert.ok(res.stderr.includes(String(stranger.pid)), res.stderr);
+
+      // Refused, not signalled: the unrelated process must be untouched, and
+      // no kill_requested event should have been recorded for it either.
+      assert.ok(pidAlive(stranger.pid), "the unrelated process must not have been touched by mc kill");
+      const killRequested = eventsAfter(id, 0).find(
+        (e: any) => e.kind === "status_change" && (e.payload as any)?.kill_requested,
+      );
+      assert.ok(!killRequested, "kill_requested must not be recorded for a refused PID-reuse kill");
+    } finally {
+      if (stranger.pid) process.kill(stranger.pid, "SIGKILL");
+    }
+  });
+
+  test("mc kill: bare-pid fallback still escalates to SIGKILL when the group signal is unavailable", async () => {
+    const { insertRun, insertEvent } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // NOT spawned detached: its process-group id is inherited from this test
+    // process (not itself), so `process.kill(-pid, ...)` treating its own
+    // pid as a group id fails with ESRCH and killGroupOrPid must fall back
+    // to a bare-pid signal. It also traps and ignores SIGTERM, so only a
+    // SIGKILL can end it - exactly the regression: escalation polling
+    // groupAlive() unconditionally reads "dead" on the very first ESRCH
+    // check and skips SIGKILL entirely, leaving this alive forever.
+    const stubborn = spawn(
+      process.execPath,
+      ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
+      { stdio: "ignore" },
+    );
+    stubborn.unref();
+    await sleep(300);
+    assert.ok(pidAlive(stubborn.pid), "sanity: stubborn process must be alive before mc kill runs");
+
+    const id = "bare0001";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "non-grouped, SIGTERM-ignoring harness", title: "non-grouped harness",
+      spec_path: join(home, "bare-none.json"), workdir: join(home, "bare-none"), session_id: null,
+      exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: stubborn.pid, supervisor_pid: 999_999_993, stderr_path: join(home, "bare-none.log"),
+      artifacts: [], verify_evidence: null, notified: true,
+    } as never);
+    insertEvent(id, "status_change", {
+      exit: "running", pid: stubborn.pid, supervisor_pid: 999_999_993, pid_start: psLstart(stubborn.pid!),
+    });
+
+    try {
+      const res = await runMc(entry, ["kill", id]);
+      assert.equal(res.status, 0, res.stderr);
+
+      // SIGTERM alone never kills it (trapped and ignored) - only a
+      // correctly-escalated bare-pid SIGKILL does.
+      const start = Date.now();
+      while (pidAlive(stubborn.pid) && Date.now() - start < 15000) await sleep(200);
+      assert.equal(pidAlive(stubborn.pid), false, `pid ${stubborn.pid} still alive after mc kill (bare-pid SIGKILL never fired)`);
+    } finally {
+      if (stubborn.pid && pidAlive(stubborn.pid)) process.kill(stubborn.pid, "SIGKILL");
+    }
+  });
+
+  test("mc kill: still refuses a lost run whose pid is already dead", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "dead0001";
+    insertRun({
+      id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
+      host: "test", prompt: "long dead", title: "long dead", spec_path: join(home, "dead-none.json"),
+      workdir: join(home, "dead-none"), session_id: null, exit: "lost", verdict: "pending",
+      started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
+      cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
+      budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
+      pid: 999_999_997, supervisor_pid: 999_999_996, stderr_path: join(home, "dead-none.log"),
+      artifacts: [], verify_evidence: null, notified: true,
+    } as never);
+    assert.ok(!pidAlive(999_999_997), "sanity: this pid must not actually exist");
+
+    const res = spawnSync(process.execPath, [entry, "kill", id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(res.status, 1);
+    assert.ok(res.stderr.includes("not killable"), res.stderr);
   });
 
   test("notify_result records that no hooks were configured", async () => {
