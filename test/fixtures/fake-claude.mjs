@@ -54,6 +54,10 @@ emit({ type: "system", subtype: "task_progress", task_id: "wtga1fo90", tool_use_
 emit({ type: "system", subtype: "task_updated", task_id: "btfgjqgv2", patch: { status: "failed", end_time: 1785150239528 }, uuid: "b8757d4b-d042-4879-bd67-07990bfc0955", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
 emit({ type: "system", subtype: "task_notification", task_id: "bc8l380mx", tool_use_id: "Bash_22", status: "completed", output_file: "", summary: "Probe candidate fire data and basemap endpoints", uuid: "8066f7b8-7714-428d-9e69-acce8805377d", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
 emit({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "wtga1fo90", task_type: "local_workflow", description: "Research fire data sources, build 3D frontend and FastAPI backend in parallel" }], uuid: "71c1eba0-7ab4-487b-b33d-a617a8c53ce1", session_id: "c28490ea-4f43-4c64-9333-799ead0e33b7" });
+// Tool-call heartbeat noise for long-running calls - a TOP-LEVEL type, not a
+// system subtype, captured VERBATIM from a live run (claude-code 2.1.220,
+// hermes host, 2026-07-28, run 1e0e37) - must not trip parser health.
+emit({ type: "tool_progress", tool_use_id: "Bash_211-heartbeat-12", tool_name: "Bash", parent_tool_use_id: "Bash_211", elapsed_time_seconds: 390, heartbeat: true, session_id: "12c2a9e2-8e81-4035-85ed-4417275b07e0", uuid: "d6b76be3-876c-406f-bd87-7c5b02048b74" });
 emit({ type: "assistant", message: { content: [{ type: "thinking", thinking: "..." }] } });
 emit({ type: "assistant", message: { content: [{ type: "text", text: "Working on it." }] } });
 emit({ type: "assistant", message: { content: [{ type: "tool_use", name: "Write", input: { file_path: "out.txt" } }] } });

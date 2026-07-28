@@ -106,6 +106,13 @@ export const claudeCode: HarnessAdapter = {
     const SUBAGENT_SYSTEM = /^(task_started|task_progress|task_updated|task_notification|background_tasks_changed)$/;
 
     switch (obj?.type) {
+      case "tool_progress":
+        // Heartbeat noise for long-running tool calls (Bash, Read, WebFetch,
+        // WebSearch, TaskOutput), captured verbatim from a live run (claude-code
+        // 2.1.220, hermes host, 2026-07-28): {type, tool_use_id, tool_name,
+        // parent_tool_use_id, elapsed_time_seconds, heartbeat: true, session_id,
+        // uuid}. Not format drift - deliberately skipped like BENIGN_SYSTEM below.
+        break;
       case "system":
         if (obj.subtype === "init") {
           events.push({ kind: "started", payload: { session_id: obj.session_id, model: obj.model } });
