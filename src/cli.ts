@@ -223,6 +223,29 @@ function age(iso: string): string {
   return `${Math.round(seconds / 86400)}d`;
 }
 
+// Wall-clock span of the run itself (started_at -> ended_at), distinct from
+// age() which measures time since start and keeps counting for runs still
+// going. A run with no ended_at yet (still running/queued) has no duration
+// to report - "-" rather than a misleading in-progress number that would
+// look like a final total.
+function duration(startedAt: string, endedAt: string | null): string {
+  if (!endedAt) return "-";
+  const seconds = Math.max(0, (new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 1000);
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
+}
+
+// Compact token count for table display: 73000 -> "73k", 950 -> "950".
+function compactTokens(n: number): string {
+  return n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`;
+}
+
+function tokensCell(r: Pick<Run, "tokens_in" | "tokens_out">): string {
+  if (r.tokens_in == null && r.tokens_out == null) return "-";
+  return `${compactTokens(r.tokens_in ?? 0)}/${compactTokens(r.tokens_out ?? 0)}`;
+}
+
 interface ParsedRunArgs {
   spec: RunSpec;
 }
@@ -531,7 +554,7 @@ export async function cliMain(argv: string[]): Promise<void> {
           console.log("no runs");
           break;
         }
-        const header = ["ID", "TITLE", "HARNESS", "MODEL", "EXIT", "VERDICT", "COST", "AGE"];
+        const header = ["ID", "TITLE", "HARNESS", "MODEL", "EXIT", "VERDICT", "COST", "TOKENS", "DURATION", "AGE"];
         const rows = runs.map((r) => [
           r.id,
           r.title.slice(0, 40),
@@ -540,6 +563,8 @@ export async function cliMain(argv: string[]): Promise<void> {
           r.exit,
           r.verdict,
           r.cost_usd != null ? `$${r.cost_usd.toFixed(2)}` : r.cost_basis === "flat_subscription" ? "plan" : "-",
+          tokensCell(r),
+          duration(r.started_at, r.ended_at),
           age(r.started_at),
         ]);
         const widths = header.map((h, i) => Math.max(h.length, ...rows.map((row) => row[i]!.length)));
@@ -553,6 +578,13 @@ export async function cliMain(argv: string[]): Promise<void> {
         // Read command: detect lost runs only, never dispatch/retry delivery.
         const run = (await reapLostRuns([requireRun(args[0])], false))[0]!;
         console.log(JSON.stringify(run, null, 2));
+        // Highlighted summary: the JSON above already carries cost_usd/tokens_in/
+        // tokens_out/started_at/ended_at, but as ~4 fields among ~20 - and on a
+        // long run the final cost_update can scroll out of the 10-event window
+        // below. One line keeps "what did this cost" glanceable without a second
+        // source of truth (still computed from the same run row, nothing new).
+        const cost = run.cost_usd != null ? `$${run.cost_usd.toFixed(2)}` : run.cost_basis === "flat_subscription" ? "plan" : "unavailable";
+        console.log(`\ncost=${cost}  tokens=${tokensCell(run)}  duration=${duration(run.started_at, run.ended_at)}`);
         const recent = eventsAfter(run.id, 0).slice(-10);
         if (recent.length > 0) {
           console.log("\nlast events:");
