@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { detectTimeoutMs } from "./detect-timeout.js";
 /**
  * codex adapter, grounded in codex-cli 0.144.6 `exec --json` (probed live):
  *   {"type":"thread.started","thread_id":"<uuid>"}
@@ -38,7 +39,7 @@ export const codex = {
         const path = resolveBin();
         if (!path)
             return { installed: false };
-        const v = spawnSync(path, ["--version"], { encoding: "utf8", timeout: 10_000 });
+        const v = spawnSync(path, ["--version"], { encoding: "utf8", timeout: detectTimeoutMs() });
         const runnable = v.status === 0 && !v.error;
         return { installed: runnable, path, version: v.stdout?.trim() || undefined };
     },
