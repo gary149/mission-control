@@ -152,7 +152,11 @@ describe("mission-control e2e (stub harness)", () => {
     for (const expected of ["started", "text", "tool_call", "subagent", "cost_update", "verify_result", "notify_result", "exited"]) {
       assert.ok(kinds.includes(expected), `missing event kind ${expected} in ${kinds}`);
     }
-    // A clean run synthesizes nothing: no error events of any kind.
+    // A clean run synthesizes nothing: no error events of any kind. The
+    // fixture also emits a real tool_progress heartbeat (long-running Bash/
+    // Read/WebFetch/TaskOutput calls) - a TOP-LEVEL type the adapter must
+    // treat as benign, or this assertion (and the "verified" verdict above)
+    // would fail with parser_health poisoned.
     assert.ok(!kinds.includes("error"), `unexpected error events in ${kinds}`);
 
     // Subagent lifecycle (system subtypes) maps to STRUCTURED events, never to
