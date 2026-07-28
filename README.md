@@ -95,6 +95,20 @@ the run the moment accumulated spend crosses the cap (checked between turns, so 
 overshoot by one turn). Everywhere else use `--max-minutes`. Either way, a run whose
 harness goes silent past `--max-idle-minutes` (default 30) is killed as a stall.
 
+OpenRouter is just the builtin. Any OpenAI- or Anthropic-compatible endpoint (LiteLLM,
+vLLM, a corporate proxy) is one config block away:
+
+```toml
+# ~/.mission-control/config.toml
+[gateway.myproxy]
+base_url_openai = "https://llm.example.com/v1"   # and/or base_url_anthropic
+env_var         = "MYPROXY_API_KEY"              # name of the resident env var - the value is never stored
+```
+
+Then `mc run --gateway myproxy ...` (claude-code, codex, kimi-code today; pi and
+opencode are openrouter-only for now), and `mc harness check <name> --gateway myproxy`
+proves the wiring against the real CLI before you rely on it.
+
 ## Notifications
 
 One push per finished run, carrying both `exit` and `verdict` - and, when a run doesn't
