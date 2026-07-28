@@ -370,6 +370,76 @@ describe("mission-control e2e (stub harness)", () => {
     assert.ok(err, "missing harness-error event for a failed pi run");
   });
 
+  test("pi: SOFTFAIL (errored terminal turn, process exit 0) is NOT a false green, even with an artifact present", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    // pi's real shape (print-mode.js, `--mode json`): the process exits 0
+    // even when the final assistant message has stopReason "error". The old
+    // exit-code-only classification would call this `succeeded`, and with
+    // out.txt on disk, `verified`.
+    const run = launch(
+      baseSpec({
+        harness: "pi",
+        model: "fake/model",
+        prompt: "produce out.txt then fail softly SOFTFAIL",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.ok(existsSync(join(done.workdir, "out.txt")), "fixture must actually write the artifact");
+    assert.equal(done.exit, "failed");
+    assert.notEqual(done.verdict, "verified");
+    assert.equal(done.verdict, "failed_verification");
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "a cleanly parsed error turn_end must not poison parser health");
+  });
+
+  test("pi: ABORTFAIL (stopReason aborted) fails the same way, and usage from the aborted turn is still recorded", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const run = launch(
+      baseSpec({
+        harness: "pi",
+        model: "fake/model",
+        prompt: "produce out.txt then abort ABORTFAIL",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "failed");
+    assert.notEqual(done.verdict, "verified");
+    // The `usage` object is required on error/aborted terminal messages too -
+    // dropping it would silently understate cost/tokens and starve --budget
+    // enforcement on the run's way out.
+    assert.equal(done.tokens_in, 300);
+    assert.equal(done.tokens_out, 7);
+    assert.ok(done.cost_usd != null && Math.abs(done.cost_usd - 0.001) < 1e-6, `cost_usd ${done.cost_usd} != ~0.001`);
+  });
+
+  test("pi: real-but-unmapped session events (compaction, auto-retry, queue) stay parser-healthy and reach verified", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    const run = launch(
+      baseSpec({
+        harness: "pi",
+        model: "fake/model",
+        prompt: "produce out.txt NOISYEVENTS",
+        artifacts: ["out.txt"],
+        auth: { mode: "gateway", gateway: "openrouter" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "verified");
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "queue_update/compaction_start/compaction_end/auto_retry_* must not poison parser health");
+  });
+
   test("pi: api_key mode refused with an honest rationale", async () => {
     const { launch } = await import("../src/core/launch.ts");
     assert.throws(
@@ -783,6 +853,43 @@ describe("mission-control e2e (stub harness)", () => {
     assert.throws(() => launch(baseSpec({ artifacts: ["/etc/passwd"] }) as never), /escapes the run workdir/);
   });
 
+  test("preflight refuses an artifact path that resolves to the workdir root itself (--artifact ., empty, or a no-op relative path)", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    // `.` and "" previously resolved to the workdir root and PASSED validation
+    // (the check allowed `resolved === root`), so a declared artifact of "."
+    // - or an empty string via `--spec -` - trivially satisfied the artifact
+    // check against whatever the workdir already contained.
+    assert.throws(() => launch(baseSpec({ artifacts: ["."] }) as never), /escapes the run workdir/);
+    assert.throws(() => launch(baseSpec({ artifacts: [""] }) as never), /escapes the run workdir/);
+    assert.throws(() => launch(baseSpec({ artifacts: ["   "] }) as never), /escapes the run workdir/);
+    assert.throws(() => launch(baseSpec({ artifacts: ["sub/.."] }) as never), /escapes the run workdir/);
+  });
+
+  test("a directory at the declared artifact path fails verification, not verified", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+
+    // The old check was `exists && size > 0`; an ordinary directory (~4096
+    // bytes) satisfied that just as well as a real deliverable. Directive
+    // MKDIRARTIFACT tells the fake harness to `mkdir` the declared path
+    // instead of writing a file to it.
+    const run = launch(
+      baseSpec({
+        harness: "codex",
+        prompt: "make a directory instead of a file MKDIRARTIFACT",
+        artifacts: ["out.txt"],
+        auth: { mode: "api_key" },
+      }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.verdict, "failed_verification");
+    assert.notEqual(done.verdict, "verified");
+    const artifactCheck = JSON.parse(done.verify_evidence).find((c: any) => c.name === "artifact:out.txt");
+    assert.ok(artifactCheck, "missing artifact:out.txt check");
+    assert.equal(artifactCheck.passed, false);
+    assert.ok(artifactCheck.detail.includes("not a regular file"), artifactCheck.detail);
+  });
+
   test("preflight refuses invalid cap values", async () => {
     const { launch } = await import("../src/core/launch.ts");
     assert.throws(() => launch(baseSpec({ max_minutes: -5 }) as never), /finite positive/);
@@ -846,6 +953,74 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(done.verdict, "failed_verification"); // an honest failure, not blindness
     const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
     assert.ok(health.passed, "cleanly parsed harness errors must not poison parser health");
+  });
+
+  test("codex: mcp_tool_call and web_search items don't poison parser health, and the tool name/result are captured", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
+
+    // Real codex exec-item types (confirmed against the installed codex-cli
+    // 0.145.0 binary's item-type enum) that previously had no branch and fell
+    // to the `else` -> unknown-native-event -> capped the verdict at
+    // unverifiable on any run that used an MCP tool or web search.
+    const run = launch(
+      baseSpec({ harness: "codex", prompt: "produce out.txt MCPTOOLS", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
+    );
+    const done = await waitTerminal(() => getRun(run.id));
+    assert.equal(done.exit, "succeeded");
+    assert.equal(done.verdict, "verified");
+    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
+    assert.ok(health.passed, "mcp_tool_call/web_search items must not poison parser health");
+
+    // The ThreadItem binding carries `server` and `tool` as separate fields -
+    // the tool_call event must be keyed on `tool` (the actual tool name), not
+    // fall back to `server` and lose which tool ran.
+    const events = eventsAfter(run.id, 0);
+    const toolCalls = events.filter((e: any) => e.kind === "tool_call").map((e: any) => e.payload as any);
+    const mcpCall = toolCalls.find((p) => p.name === "fake_tool");
+    assert.ok(mcpCall, `mcp_tool_call must be captured under item.tool, got names: ${toolCalls.map((p) => p.name)}`);
+    const webSearchCall = toolCalls.find((p) => p.name === "web_search");
+    assert.ok(webSearchCall, "web_search tool_call missing");
+
+    // result is a structured McpToolCallResult object, not a string - the
+    // excerpt must be a readable serialization, never "[object Object]". The
+    // fixture also emits a command_execution tool_result ("hi\n"), so check
+    // across all tool_result excerpts rather than assuming stream order.
+    const excerpts = events
+      .filter((e: any) => e.kind === "tool_result")
+      .map((e: any) => String((e.payload as any).excerpt));
+    assert.ok(!excerpts.some((x) => x.includes("[object Object]")), `excerpt collapsed to [object Object]: ${excerpts}`);
+    assert.ok(excerpts.some((x) => x.includes("tool ok")), `missing mcp_tool_call result excerpt, got: ${excerpts}`);
+  });
+
+  test("mc kill: a harness that traps SIGTERM and exits 0 anyway still lands `killed`, not `succeeded`", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const run = launch(
+      baseSpec({ harness: "codex", prompt: "hang until killed TRAPSIGTERM", auth: { mode: "api_key" } }) as never,
+    );
+
+    // `mc kill` requires exit === "running" with a pid recorded - wait for the
+    // supervisor to actually spawn the child.
+    const start = Date.now();
+    let running = getRun(run.id)!;
+    while (running.exit !== "running" || !running.pid) {
+      if (Date.now() - start > 10000) throw new Error(`run never reached running: ${JSON.stringify(running)}`);
+      await sleep(100);
+      running = getRun(run.id)!;
+    }
+
+    const res = spawnSync(process.execPath, [entry, "kill", run.id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(res.status, 0, res.stderr);
+
+    const done = await waitTerminal(() => getRun(run.id));
+    // The fixture traps SIGTERM, finishes its turn, and exits 0 - the old
+    // exitCode-only (plus signal-only) classification would call this
+    // `succeeded`, since neither exitCode nor a raw kill signal fired.
+    assert.equal(done.exit, "killed");
+    assert.notEqual(done.exit, "succeeded");
   });
 
   test("CLI resume inherits artifacts/visual/caps from the parent; flags override", async () => {
