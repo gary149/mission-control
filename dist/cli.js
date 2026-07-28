@@ -157,10 +157,32 @@ function isActive(run) {
  * alive, nobody is logging, capping, verifying, or notifying it anymore.
  * The lost transition is atomic (markLost) so a supervisor finishing between
  * our snapshot and the write can never have its terminal truth clobbered.
- * Terminal rows that never got their push (crash mid-delivery) are re-notified.
+ * This detection always runs, for every caller.
+ *
+ * `deliver` gates a SEPARATE concern: whether a terminal-but-unnotified row
+ * also gets a (re)dispatch attempt here. Read commands (`ls`/`show`/`tail`,
+ * and `harness check`'s poll) must pass false and stay side-effect free -
+ * they only report the current truth, undelivered or not. Only `mc reap`
+ * (the cron-safe delivery path SPEC designates) passes true; the supervisor
+ * delivers too, but via its own direct notifyTerminal call at terminal, not
+ * through this function.
+ *
+ * Why read commands can't deliver: fix 2 (retry on full delivery failure)
+ * leaves `notified` false so a permanently-failing hook gets retried by a
+ * later `mc reap`. If a read command dispatched too, `mc tail` - which polls
+ * every 500ms and only breaks once a terminal row produces no NEW events -
+ * would see notifyTerminal's own fresh notify_result event as "new" on every
+ * poll and never break, hammering the failing hook forever.
+ *
+ * `deliver` defaults to false: a caller that doesn't explicitly opt into
+ * delivery must not deliver, since false is the safe choice (it never
+ * spuriously fires a hook). Every delivering call site (`mc reap`, `mc
+ * harness check`'s poll) passes `true` explicitly; any caller that omits the
+ * argument - including ones added later without knowing about this flag -
+ * correctly falls back to the non-delivering, side-effect-free read path.
  */
-async function reapLostRuns(runs) {
-    const config = loadConfig();
+async function reapLostRuns(runs, deliver = false) {
+    const config = deliver ? loadConfig() : null;
     const out = [];
     for (const run of runs) {
         let current = run;
@@ -183,7 +205,7 @@ async function reapLostRuns(runs) {
                 current = getRun(current.id);
             }
         }
-        if (!isActive(current) && !current.notified) {
+        if (deliver && !isActive(current) && !current.notified) {
             await notifyTerminal(current, config);
             current = getRun(current.id) ?? current;
         }
@@ -354,7 +376,13 @@ async function harnessCheck(args) {
     const waitTerminal = async (id, timeoutMs) => {
         const start = Date.now();
         for (;;) {
-            const current = (await reapLostRuns([getRun(id)]))[0];
+            // Not one of the general read commands: this polls a run `mc harness
+            // check` itself just launched, and breaks the instant it goes
+            // terminal (no "wait for a quiet poll" condition), so it can't loop
+            // hammering a hook the way `mc tail` could. Delivering here is
+            // harmless either way - the atomic claim (fix 3) means it can only
+            // ever race the supervisor's own dispatch, never double-fire.
+            const current = (await reapLostRuns([getRun(id)], true))[0];
             if (!isActive(current))
                 return current;
             if (Date.now() - start > timeoutMs)
@@ -504,7 +532,9 @@ export async function cliMain(argv) {
                 break;
             }
             case "ls": {
-                const runs = await reapLostRuns(listRuns());
+                // Read command: detect lost runs, but never dispatch/retry delivery
+                // (that's `mc reap`'s job) - see reapLostRuns's doc comment.
+                const runs = await reapLostRuns(listRuns(), false);
                 if (args.includes("--json")) {
                     console.log(JSON.stringify(runs, null, 2));
                     break;
@@ -531,7 +561,8 @@ export async function cliMain(argv) {
                 break;
             }
             case "show": {
-                const run = (await reapLostRuns([requireRun(args[0])]))[0];
+                // Read command: detect lost runs only, never dispatch/retry delivery.
+                const run = (await reapLostRuns([requireRun(args[0])], false))[0];
                 console.log(JSON.stringify(run, null, 2));
                 const recent = eventsAfter(run.id, 0).slice(-10);
                 if (recent.length > 0) {
@@ -550,8 +581,13 @@ export async function cliMain(argv) {
                         console.log(`${event.ts} ${event.kind} ${JSON.stringify(event.payload)}`);
                     }
                     // Reap here too - otherwise a dead supervisor leaves tail polling a
-                    // frozen `running` row forever.
-                    const current = (await reapLostRuns([getRun(run.id)]))[0];
+                    // frozen `running` row forever. Never dispatch/retry delivery from
+                    // here though: notifyTerminal's own notify_result event would
+                    // count as "new" below on every poll, so a permanently-failing
+                    // hook would keep this loop from ever seeing a quiet poll and it
+                    // would never break, hammering the hook forever. `mc reap` is the
+                    // retry path; this is a read command.
+                    const current = (await reapLostRuns([getRun(run.id)], false))[0];
                     if (!["running", "queued"].includes(current.exit) && eventsAfter(run.id, seq).length === 0) {
                         console.log(`-- terminal: exit=${current.exit} verdict=${current.verdict} --`);
                         break;
@@ -689,14 +725,21 @@ export async function cliMain(argv) {
             }
             case "reap": {
                 // Cron-safe lost-run detection + at-least-once notification delivery:
-                // the push half of the system must not depend on anyone running `mc ls`.
+                // the push half of the system must not depend on anyone running `mc
+                // ls`/`show`/`tail` - those read commands deliberately do NOT
+                // dispatch or retry delivery (see reapLostRuns's doc comment). This
+                // is the one place besides the supervisor's own terminal dispatch
+                // that does.
                 const before = listRuns();
                 const activeIds = new Set(before.filter(isActive).map((r) => r.id));
                 const unnotified = new Set(before.filter((r) => !isActive(r) && !r.notified).map((r) => r.id));
-                const after = await reapLostRuns(before);
+                const after = await reapLostRuns(before, true);
                 const lost = after.filter((r) => r.exit === "lost" && activeIds.has(r.id)).length;
-                const delivered = after.filter((r) => r.notified && (unnotified.has(r.id) || (activeIds.has(r.id) && r.exit === "lost"))).length;
-                console.log(`reaped ${lost} lost run(s), delivered ${delivered} pending notification(s)`);
+                // "settled": the delivery obligation was discharged - a channel
+                // delivered, or none were configured. Not a claim of guaranteed
+                // external receipt (a failed hook leaves notified=false for retry).
+                const settled = after.filter((r) => r.notified && (unnotified.has(r.id) || (activeIds.has(r.id) && r.exit === "lost"))).length;
+                console.log(`reaped ${lost} lost run(s), settled ${settled} notification(s)`);
                 break;
             }
             case "harness": {
