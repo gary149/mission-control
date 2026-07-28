@@ -6,11 +6,18 @@ import { isAbsolute, resolve, sep } from "node:path";
  * (hypothetical) workdir. Used at preflight, before the workdir exists.
  */
 export function artifactStaysInside(artifact) {
+    // Empty/whitespace and "." (or any relative path that nets to the workdir
+    // itself) declare no actual file - the workdir root is a directory, not an
+    // artifact, and letting it through meant `--artifact .` (or an empty string
+    // via `--spec -`) trivially "verified" against whatever the workdir already
+    // contained (e.g. inherited on resume).
+    if (!artifact.trim())
+        return false;
     if (isAbsolute(artifact))
         return false;
     const root = resolve(sep, "mc-root", "work");
     const resolved = resolve(root, artifact);
-    return resolved === root || resolved.startsWith(root + sep);
+    return resolved.startsWith(root + sep);
 }
 /** Resolve an artifact against the real workdir, refusing escapes (incl. symlinks). */
 function containedArtifactPath(workdir, artifact) {
@@ -34,13 +41,18 @@ function containedArtifactPath(workdir, artifact) {
  * lines or no terminal result event) - blindness caps the verdict at
  * unverifiable rather than pretending the checks tell the whole story.
  */
-export function verify(run, spec, exitCode, isGit, parserHealthy = true, headAtLaunch = null) {
+export function verify(run, spec, exitCode, isGit, parserHealthy = true, headAtLaunch = null, 
+// Authoritative terminal outcome: some harnesses (pi, confirmed) exit the
+// process with code 0 even when the MOST RECENT turn_end reported an error
+// or abort. `exitCode === 0` alone must never be enough to pass this check -
+// that is exactly the false-green the "exit_code" check exists to catch.
+lastTurnError = false) {
     const checks = [];
     checks.push({
         name: "exit_code",
         applicable: true,
-        passed: exitCode === 0,
-        detail: `process exited ${exitCode}`,
+        passed: exitCode === 0 && !lastTurnError,
+        detail: lastTurnError ? `process exited ${exitCode} but the terminal turn reported an error` : `process exited ${exitCode}`,
     });
     if (isGit) {
         // Effect = commits made since launch OR a dirty tree. An agent that does
@@ -70,13 +82,19 @@ export function verify(run, spec, exitCode, isGit, parserHealthy = true, headAtL
             checks.push({ name: `artifact:${artifact}`, applicable: true, passed: false, detail: "escapes workdir" });
             continue;
         }
+        // A directory (or any non-regular file - socket, fifo, device) satisfies
+        // exists && size > 0 just as well as a real deliverable (a dir's own
+        // dirent is ~4096 bytes); require a genuine regular file before the size
+        // check means anything.
         const exists = existsSync(path);
-        const size = exists ? statSync(path).size : 0;
+        const st = exists ? statSync(path) : null;
+        const isFile = st?.isFile() ?? false;
+        const size = st?.size ?? 0;
         checks.push({
             name: `artifact:${artifact}`,
             applicable: true,
-            passed: exists && size > 0,
-            detail: exists ? `${size} bytes` : "missing",
+            passed: isFile && size > 0,
+            detail: !exists ? "missing" : !isFile ? "not a regular file" : `${size} bytes`,
         });
     }
     checks.push({

@@ -119,6 +119,38 @@ export const codex = {
                 else if (item.type === "reasoning" || item.type === "todo_list") {
                     break; // benign
                 }
+                else if (item.type === "mcp_tool_call") {
+                    // Real codex SDK item type (confirmed against the installed
+                    // @openai/codex 0.145.0 exec-item enum, alongside command_execution/
+                    // file_change) - previously fell to the `else` below and poisoned
+                    // parser health on any run that used an MCP tool. The ThreadItem
+                    // binding carries `server` and `tool` as SEPARATE fields - `tool` is
+                    // the actual tool name; `server` alone loses which tool ran.
+                    events.push({
+                        kind: "tool_call",
+                        payload: {
+                            name: item.tool ?? item.tool_name ?? item.name ?? item.server ?? "mcp_tool_call",
+                            input: JSON.stringify(item.arguments ?? item.invocation ?? {}).slice(0, 2000),
+                        },
+                    });
+                    if (item.output != null || item.result != null || item.error != null) {
+                        // result/error are structured objects (McpToolCallResult /
+                        // McpToolCallError bindings), not strings - only the fixture's
+                        // `output` is ever a plain string. String(obj) would collapse
+                        // either to the useless "[object Object]", so stringify anything
+                        // that isn't already a string.
+                        const raw = item.output ?? item.result ?? item.error;
+                        const excerpt = typeof raw === "string" ? raw : JSON.stringify(raw);
+                        events.push({ kind: "tool_result", payload: { excerpt: excerpt.slice(0, 500) } });
+                    }
+                }
+                else if (item.type === "web_search") {
+                    // Real codex SDK item type, same enum as mcp_tool_call above.
+                    events.push({
+                        kind: "tool_call",
+                        payload: { name: "web_search", input: String(item.query ?? "").slice(0, 2000) },
+                    });
+                }
                 else if (item.type === "error") {
                     // codex reports warnings/errors as items (e.g. "Model metadata for
                     // `x` not found") - cleanly parsed, so it must not poison parser
