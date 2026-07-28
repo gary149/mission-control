@@ -136,6 +136,21 @@ export function markLost(id) {
         .run(new Date().toISOString(), id);
     return Number(result.changes) > 0;
 }
+/**
+ * Atomically claim the notify obligation for a run: flips `notified` 0 -> 1
+ * and returns whether THIS caller won the race. Mirrors markLost's
+ * compare-and-swap shape. Without this, two callers racing on the same
+ * terminal run (the supervisor's own exit path vs a concurrent `mc reap` or
+ * a read command's inline reap) both read a stale `notified: false` and both
+ * dispatch the hook. Only the claim winner may proceed to dispatch; see
+ * notify.ts for how a total delivery failure releases the claim again.
+ */
+export function claimNotify(id) {
+    const result = openDb()
+        .prepare("UPDATE runs SET notified = 1 WHERE id = ? AND notified = 0")
+        .run(id);
+    return Number(result.changes) > 0;
+}
 export function insertEvent(runId, kind, payload) {
     const insert = () => openDb()
         .prepare(`INSERT INTO events (run_id, seq, ts, kind, payload)
