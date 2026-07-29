@@ -398,6 +398,13 @@ wire_api           = "responses"                      # codex only: "chat" | "re
                                                       # configured value actually works.
 ```
 
+Before spawning the harness, `mc run` also asks `${base_url_openai}/models` (the
+standard OpenAI-compatible catalog listing) whether the requested model is currently
+served, and refuses if the gateway gives a confident "no". This is a best-effort
+safety net, not a hard contract: an unreachable endpoint, a timeout, or a response
+that isn't a well-formed non-empty catalog fails OPEN rather than block a run that
+might otherwise have worked — only a gateway that positively answers gets to veto.
+
 Gateway mode requires a provider-prefixed model id (`x-ai/grok-4.6`); refused otherwise.
 Per-adapter wiring is the documented recipe for each CLI: claude-code gets
 `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_MODEL` +
