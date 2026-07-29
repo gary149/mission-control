@@ -128,6 +128,8 @@ notifications - nothing terminates silently.
 
 ## Going deeper
 
+- [docs/agents.md](./docs/agents.md) - operating guide for agents driving mc: good
+  practices distilled from real fleet operation (also linked from `mc help`)
 - [SPEC.md](./SPEC.md) - full design: adapters, verification, auth, cost model
 - [CONTEXT.md](./CONTEXT.md) - domain glossary
 - [docs/adr/](./docs/adr/) - decisions and their reasons
