@@ -398,6 +398,16 @@ wire_api           = "responses"                      # codex only: "chat" | "re
                                                       # configured value actually works.
 ```
 
+**Model-catalog preflight.** In gateway mode, before launching, mc asks the gateway's
+own `GET /models` (`base_url_openai` + `/models`) whether `--model` is in its served
+catalog, and refuses the run if the gateway confidently says no - a stale or typo'd
+model id would otherwise only surface after the harness spawns and burns a turn. This
+check fails OPEN, not closed, on anything less than a confident refusal: unreachable
+gateway, timeout (5s), non-2xx, unparseable body, or an empty/malformed catalog all
+let the run proceed. It is a live third-party fact, not a deterministic local one like
+the other preflight checks in this module, so the default has to be "don't block a run
+that might still work" rather than "fail closed."
+
 Before spawning the harness, `mc run` also asks `${base_url_openai}/models` (the
 standard OpenAI-compatible catalog listing) whether the requested model is currently
 served, and refuses if the gateway gives a confident "no". This is a best-effort
@@ -633,8 +643,9 @@ Each milestone is shippable and used daily before the next starts.
   `mc harness check codex` (codex-cli 0.144.6, session continued, artifact appended).
 - Pi session_id: RESOLVED - pi sessions live in the run dir via `--session-dir`; the
   session id resumes with `--session <id>`, verified by `mc harness check pi`.
-- `lost`-run detection cadence: on-demand at `mc ls` in v1; decide whether milestone 5
-  needs a `mc reap` cron on the box.
+- `lost`-run detection cadence: RESOLVED - on-demand at `mc ls`/`mc show` (side-effect
+  free) plus `mc reap`, a dedicated cron-safe command that also delivers pending
+  notifications; documented per-integration in `docs/integrations/`.
 - macOS Keychain scopes claude-code's subscription login to one OS user identity: two
   different human operators sharing one unix account on a host is outside the model
   (per-host ledger already assumes one operator per account; make that explicit if it
