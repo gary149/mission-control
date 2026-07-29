@@ -67,7 +67,7 @@ a non-empty regular file - not that the agent claimed success.
 ```sh
 mc run --harness H [--model M] [--gateway openrouter] [--budget 99] \
        [--max-minutes 360] [--max-idle-minutes 30] [--artifact PATH] [--visual] "task"
-mc ls                        # every run: exit + verdict + cost, at a glance
+mc ls                        # every run: exit + verdict + cost + tokens + duration
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
 mc show <id>                 # full record + verification evidence
 mc resume <id> "add tests"   # continue the session, new linked run, same workdir
