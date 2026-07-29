@@ -209,3 +209,62 @@ export function resolveAuth(spec, adapter, config) {
     const envVar = adapter.name === "claude-code" ? "ANTHROPIC_AUTH_TOKEN" : gatewayCfg.env_var;
     return { mode, costBasis, gatewayCfg, credential: { envVar, value }, source: `$${gatewayCfg.env_var} via ${name}` };
 }
+/**
+ * Best-effort gateway-mode preflight: is `spec.model` actually in the
+ * gateway's current catalog? Without this, a stale or typo'd model id is
+ * only discovered after the harness has already spawned and burned a turn
+ * (fleet evidence: exactly this class of failure - a model id the gateway
+ * will never serve - has cost real orchestrator cycles retrying a wall it
+ * could have been told about up front).
+ *
+ * The catalog list is fetched from `${base_url_openai}/models`, the standard
+ * OpenAI-compatible listing endpoint - queried once per gateway regardless of
+ * which wire protocol (`chat`/`responses`) the harness itself speaks, since
+ * the catalog is one list behind the gateway, not per-endpoint.
+ *
+ * Deliberately fails OPEN, unlike every other check in this module: a
+ * missing credential or unknown gateway name is a deterministic local fact,
+ * but this is a live network call to a third party, and a transient outage
+ * or a custom proxy that simply doesn't implement `/models` faithfully must
+ * never block a run that would otherwise have worked. Only a confident
+ * "the gateway told us its exact catalog, and this id is not in it" refuses.
+ */
+export async function checkGatewayModelServed(spec, config) {
+    if (spec.auth.mode !== "gateway" || !spec.model)
+        return;
+    const name = spec.auth.gateway;
+    const gatewayCfg = name ? config.gateways[name] : undefined;
+    if (!gatewayCfg?.base_url_openai)
+        return;
+    const apiKey = process.env[gatewayCfg.env_var];
+    if (!apiKey)
+        return; // resolveAuth reports this properly; don't duplicate or race it here
+    let res;
+    try {
+        res = await fetch(`${gatewayCfg.base_url_openai}/models`, {
+            headers: { Authorization: `Bearer ${apiKey}` },
+            signal: AbortSignal.timeout(5_000),
+        });
+    }
+    catch {
+        return; // unreachable / timed out: fail open
+    }
+    if (!res.ok)
+        return;
+    let body;
+    try {
+        body = await res.json();
+    }
+    catch {
+        return; // not JSON, or an empty body: can't parse a catalog we don't trust
+    }
+    const list = body?.data;
+    if (!Array.isArray(list) || list.length === 0)
+        return; // empty/unexpected shape: nothing confident to refuse on
+    const ids = new Set(list.map((m) => m?.id).filter((id) => typeof id === "string"));
+    if (ids.size === 0 || ids.has(spec.model))
+        return;
+    throw new PreflightError(`gateway "${name}" does not currently serve model "${spec.model}" ` +
+        `(checked ${gatewayCfg.base_url_openai}/models). A stale or typo'd model id would ` +
+        `otherwise only surface after the harness spawns and burns a turn.`);
+}
