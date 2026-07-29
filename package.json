@@ -1,11 +1,17 @@
 {
   "name": "mission-control",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Control plane for delegated agent runs",
   "type": "module",
-  "bin": { "mc": "dist/mc.js" },
-  "files": ["dist"],
-  "engines": { "node": ">=22.13" },
+  "bin": {
+    "mc": "dist/mc.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "mc": "node src/mc.ts",
     "build": "tsc -p tsconfig.build.json && chmod +x dist/mc.js",
