@@ -10,7 +10,7 @@
     "mc": "node src/mc.ts",
     "build": "tsc -p tsconfig.build.json && chmod +x dist/mc.js",
     "check": "tsc --noEmit",
-    "test": "node --test test/e2e.test.ts"
+    "test": "node --test test/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

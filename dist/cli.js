@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ADAPTERS, getAdapter } from "./core/adapters/registry.js";
-import { resolveAuth } from "./core/auth.js";
+import { checkGatewayModelServed, resolveAuth } from "./core/auth.js";
 import { loadConfig } from "./core/config.js";
 import { eventsAfter, findRun, listRuns, markLost, getRun, insertEvent } from "./core/db.js";
 import { launch } from "./core/launch.js";
@@ -552,6 +552,7 @@ export async function cliMain(argv) {
         switch (command) {
             case "run": {
                 const spec = args[0] === "--spec" && args[1] === "-" ? await readSpecFromStdin() : parseRunArgs(args).spec;
+                await checkGatewayModelServed(spec, loadConfig());
                 const run = launch(spec);
                 console.log(`${run.id}  ${run.title}`);
                 console.log(`    harness=${run.harness} model=${run.model ?? "(default)"} auth=${run.auth_mode} cost_basis=${run.cost_basis}`);
