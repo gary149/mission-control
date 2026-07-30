@@ -12,8 +12,9 @@ import { detectTimeoutMs } from "./detect-timeout.js";
  * No session-start event, no turn-complete event, and no token/cost telemetry on
  * stdout in any mode - hence cost_reporting and tokens_reporting are "none" (a
  * stream fact, not a not-yet). The resume_hint is the only end-of-run marker, so
- * it doubles as turn_end; upstream #1897 can drop it on signal shutdown, which
- * degrades the run to unverifiable - the correct fail direction.
+ * it doubles as turn_end; upstream #1897 can drop it on signal shutdown, in which
+ * case the run still completes normally, just with no session_id captured (no
+ * native resume possible afterward).
  * Failures exit 1 with an EMPTY stdout and the error on stderr (probed live).
  * `-p` is always full-auto (no bypass flag exists or is accepted); config deny
  * rules would be the only brake, and mc's scratch home has none.
