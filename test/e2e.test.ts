@@ -1429,6 +1429,71 @@ describe("mission-control e2e (stub harness)", () => {
     assert.match(bareLine!, /running\s+-\s+-\s+-\s+\d+s\s*$/); // COST/TOKENS/DURATION all "-", AGE last
   });
 
+  test("mc ls --exit filters by state, composes with --json, rejects bad input", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // Runs on distinct exit states. Other tests' rows share this DB, so
+    // assertions are include/exclude on these ids, never exact counts.
+    // notified: true on terminal rows so no later reap picks them up; live
+    // pid on the running row so ls's reap pass leaves it running.
+    insertRun(placeholderRun("flt00001", { notified: true }) as never); // succeeded (default)
+    insertRun(
+      placeholderRun("flt00002", {
+        ended_at: null, exit: "running",
+        pid: process.pid, supervisor_pid: process.pid, notified: true,
+      }) as never,
+    );
+    insertRun(placeholderRun("flt00003", { exit: "failed", notified: true }) as never);
+
+    const mcLs = (...extra: string[]) =>
+      spawnSync(process.execPath, [entry, "ls", ...extra], { encoding: "utf8", env: { ...process.env } });
+
+    const running = mcLs("--exit", "running");
+    assert.equal(running.status, 0, running.stderr);
+    assert.ok(running.stdout.includes("flt00002"), running.stdout);
+    assert.ok(!running.stdout.includes("flt00001"), running.stdout);
+    assert.ok(!running.stdout.includes("flt00003"), running.stdout);
+
+    // Comma-separated values, composed with --json: the filtered result is
+    // still the clean JSON interface, and every returned row satisfies the
+    // filter (not just the fixtures this test planted).
+    const badJson = mcLs("--exit", "failed,killed,lost", "--json");
+    assert.equal(badJson.status, 0, badJson.stderr);
+    const badRows = JSON.parse(badJson.stdout) as { id: string; exit: string }[];
+    assert.ok(badRows.some((r) => r.id === "flt00003"), badJson.stdout);
+    assert.ok(badRows.every((r) => ["failed", "killed", "lost"].includes(r.exit)), badJson.stdout);
+    assert.ok(!badRows.some((r) => r.id === "flt00001" || r.id === "flt00002"), badJson.stdout);
+
+    // A typo'd VALUE must fail loudly with the valid set, never silently
+    // match nothing.
+    const typo = mcLs("--exit", "runing");
+    assert.equal(typo.status, 1);
+    assert.match(typo.stderr, /unknown --exit value "runing"/);
+    assert.match(typo.stderr, /running/); // error lists the valid values
+
+    const missing = mcLs("--exit");
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /--exit requires a value/);
+
+    // A misspelled FLAG must also fail loudly - skipping it would return the
+    // full unfiltered ledger with exit 0 to a consumer that believes it
+    // filtered (worse than any error).
+    const typoFlag = mcLs("--exiit", "running", "--json");
+    assert.equal(typoFlag.status, 1);
+    assert.match(typoFlag.stderr, /unknown ls argument "--exiit"/);
+
+    const stray = mcLs("running");
+    assert.equal(stray.status, 1);
+    assert.match(stray.stderr, /unknown ls argument "running"/);
+
+    // All-empty tokens (`--exit ','`, or automation interpolating an empty
+    // variable) must not degrade to "no filter" and return the full ledger.
+    const emptyTokens = mcLs("--exit", ",", "--json");
+    assert.equal(emptyTokens.status, 1);
+    assert.match(emptyTokens.stderr, /--exit requires a value/);
+  });
+
   test("notify hook that never reads stdin does not crash mc reap; read commands stay side-effect free", async () => {
     const { insertRun, getRun, eventsAfter, updateRun } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
