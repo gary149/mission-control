@@ -77,7 +77,10 @@ function parseToml(text) {
 }
 export function loadConfig() {
     const gateways = { ...BUILTIN_GATEWAYS };
-    const config = { notify: { exec: null, webhook: null }, gateways };
+    const config = {
+        notify: { exec: null, webhook: null, assessment: { exec: null, webhook: null } },
+        gateways,
+    };
     const path = join(mcHome(), "config.toml");
     if (!existsSync(path))
         return config;
@@ -86,6 +89,10 @@ export function loadConfig() {
         if (name === "notify") {
             config.notify.exec = values.exec || null;
             config.notify.webhook = values.webhook || null;
+        }
+        else if (name === "notify.assessment") {
+            config.notify.assessment.exec = values.exec || null;
+            config.notify.assessment.webhook = values.webhook || null;
         }
         else if (name.startsWith("gateway.")) {
             const gwName = name.slice("gateway.".length);

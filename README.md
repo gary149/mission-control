@@ -67,17 +67,23 @@ claimed.
 ```sh
 mc run --harness H [--model M] [--gateway openrouter] [--budget 99] \
        [--max-minutes 360] [--max-idle-minutes 30] [--artifact PATH] "task"
-mc ls                        # every run: exit + cost + tokens + duration
+mc ls                        # every run: exit + review + cost + tokens + duration
 mc ls --exit running         # filter by state (comma-separated: --exit failed,killed,lost)
+mc ls --review pending       # filter by latest disposition (--review accepted,retry,blocked)
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
-mc show <id>                 # full record + recent events
+mc show <id>                 # full record + recent events + assessment history
 mc resume <id> "add tests"   # continue the session, new linked run, same workdir
 mc resume <id> --fresh --at <sha> "…"   # restart clean from a git checkpoint
 mc kill <id>
-mc reap                      # cron-safe sweep: lost runs + pending notifications
+mc assess <id> --by REVIEWER --disposition accepted|retry|blocked
+                             # record an attributed review receipt on a terminal run
+mc reap                      # cron-safe sweep: lost runs + pending notifications (both kinds)
 mc harness ls                # adapters, capabilities, which auth is ready here
 mc harness check opencode --gateway openrouter --model moonshotai/kimi-k3
                              # prove an adapter end-to-end against the real CLI
+mc init --notify-exec PATH --assessment-webhook URL --install-reap
+                             # write/verify notify hooks, install the reap cron
+mc init --check              # read-only: is the notify/assessment/cron setup healthy?
 mc help                      # every command and flag
 ```
 
@@ -126,6 +132,37 @@ webhook = "https://example.com/hook"      # POSTed the same JSON
 
 `mc reap` (cron it) sweeps runs whose supervisor died and delivers their pending
 notifications - nothing terminates silently.
+
+## Assessments
+
+mc records attributed judgments about a finished run; it never makes them. `mc assess
+<id> --by alice --disposition accepted` appends a receipt - who claimed what, and
+optionally which checkpoint SHA and evidence files back it up - to a terminal run.
+`pending_review` isn't a value mc invents: it's simply the absence of any assessment,
+so `mc ls --review pending` is a real, queryable state, not a guess.
+
+```sh
+mc assess <id> --by alice --disposition accepted --evidence dist/report.md
+mc ls --review pending          # terminal runs nobody has reviewed yet
+```
+
+mc checks that an assessment is well-formed (the run is terminal, `--by` is present,
+the disposition is one of `accepted`/`retry`/`blocked`, evidence files exist) - never
+whether the judgment itself is correct. Rubber-stamping is allowed by design:
+attribution gives provenance, not trust.
+
+Recording an assessment pushes once through its own config block - never the
+run-completion `[notify]` hook above, so an integration built for run payloads can
+never misfire on an assessment:
+
+```toml
+[notify.assessment]
+exec = "my-assessment-hook"          # receives {topic, run, assessment} as JSON on stdin
+```
+
+`mc init` writes and verifies both `[notify]` and `[notify.assessment]` for you (see
+`mc init --check`), and `mc reap` retries undelivered assessment pushes the same way
+it retries run pushes.
 
 ## Going deeper
 
