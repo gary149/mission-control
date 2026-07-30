@@ -10,8 +10,21 @@ export interface GatewayConfig {
   wire_api: "chat" | "responses";
 }
 
+export interface NotifyTarget {
+  exec: string | null;
+  webhook: string | null;
+}
+
 export interface McConfig {
-  notify: { exec: string | null; webhook: string | null };
+  notify: NotifyTarget & {
+    // A SEPARATE seam from the top-level exec/webhook above - deliberately
+    // not folded into one hook. [notify] payloads assume a terminal RUN
+    // shape (exit, cost_usd, ...); an assessment payload is shaped
+    // differently (topic + run + assessment) and sending it through the
+    // run hook could misfire an integration built against the run shape.
+    // See notify.ts's notifyAssessment and docs/agents.md.
+    assessment: NotifyTarget;
+  };
   gateways: Record<string, GatewayConfig>;
 }
 
@@ -87,7 +100,10 @@ function parseToml(text: string): Record<string, Record<string, unknown>> {
 
 export function loadConfig(): McConfig {
   const gateways: Record<string, GatewayConfig> = { ...BUILTIN_GATEWAYS };
-  const config: McConfig = { notify: { exec: null, webhook: null }, gateways };
+  const config: McConfig = {
+    notify: { exec: null, webhook: null, assessment: { exec: null, webhook: null } },
+    gateways,
+  };
 
   const path = join(mcHome(), "config.toml");
   if (!existsSync(path)) return config;
@@ -97,6 +113,9 @@ export function loadConfig(): McConfig {
     if (name === "notify") {
       config.notify.exec = (values.exec as string) || null;
       config.notify.webhook = (values.webhook as string) || null;
+    } else if (name === "notify.assessment") {
+      config.notify.assessment.exec = (values.exec as string) || null;
+      config.notify.assessment.webhook = (values.webhook as string) || null;
     } else if (name.startsWith("gateway.")) {
       const gwName = name.slice("gateway.".length);
       const base = gateways[gwName];

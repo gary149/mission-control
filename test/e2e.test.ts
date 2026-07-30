@@ -1,6 +1,7 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -253,6 +254,9 @@ describe("mission-control e2e (stub harness)", () => {
       "--max-minutes", "--budget", "--gateway", "--api-key", "--spec",
       "--fresh", "--at SHA", "--max-idle-minutes",
       "subscription", "MC_HOME", "config.toml",
+      "assess", "--by", "--disposition", "--evidence", "--review",
+      "init", "--check", "--notify-exec", "--assessment-exec", "--install-reap",
+      "notify.assessment", "pending",
     ]) {
       assert.ok(help.includes(expected), `help is missing "${expected}"`);
     }
@@ -1433,7 +1437,7 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(lsBare.status, 0, lsBare.stderr);
     const bareLine = lsBare.stdout.split("\n").find((l) => l.includes(bareId));
     assert.ok(bareLine, lsBare.stdout);
-    assert.match(bareLine!, /running\s+-\s+-\s+-\s+\d+s\s*$/); // COST/TOKENS/DURATION all "-", AGE last
+    assert.match(bareLine!, /running\s+-\s+-\s+-\s+-\s+\d+s\s*$/); // REVIEW/COST/TOKENS/DURATION all "-", AGE last
   });
 
   test("mc ls --exit filters by state, composes with --json, rejects bad input", async () => {
@@ -1832,6 +1836,455 @@ describe("mission-control e2e (stub harness)", () => {
       void seedHead; // documents the fixture's starting point; not asserted on directly
     } finally {
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("mc assess: happy path appends a row, prints it as JSON, and show/ls reflect it", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "assess01";
+    insertRun(placeholderRun(id, { exit: "succeeded", notified: true }) as never);
+    const evidencePath = join(home, "assess01-evidence.txt");
+    writeFileSync(evidencePath, "the deliverable\n");
+
+    const res = spawnSync(
+      process.execPath,
+      [entry, "assess", id, "--by", "alice", "--disposition", "accepted", "--evidence", evidencePath, "--note", "looks good"],
+      { encoding: "utf8", env: { ...process.env } },
+    );
+    assert.equal(res.status, 0, res.stderr);
+    const printed = JSON.parse(res.stdout);
+    assert.equal(printed.run_id, id);
+    assert.equal(printed.seq, 1);
+    assert.equal(printed.reviewer, "alice");
+    assert.equal(printed.disposition, "accepted");
+    assert.equal(printed.note, "looks good");
+    assert.equal(printed.evidence.length, 1);
+    assert.equal(printed.evidence[0].path, evidencePath);
+    // sha256 of "the deliverable\n" - computed independently to prove mc
+    // hashed the actual file content, not a placeholder.
+    assert.equal(
+      printed.evidence[0].sha256,
+      createHash("sha256").update("the deliverable\n").digest("hex"),
+    );
+    // `observed` is mc's own os user@host - present and distinct in spirit
+    // from the asserted `reviewer` (never itself asserted to equal it).
+    assert.ok(printed.observed && printed.observed.includes("@"), printed.observed);
+
+    const show = spawnSync(process.execPath, [entry, "show", id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(show.status, 0, show.stderr);
+    assert.ok(show.stdout.includes("review=accepted"), show.stdout);
+    assert.ok(show.stdout.includes("assessments:"), show.stdout);
+    assert.ok(show.stdout.includes("alice -> accepted"), show.stdout);
+
+    const ls = spawnSync(process.execPath, [entry, "ls"], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(ls.status, 0, ls.stderr);
+    const lsLine = ls.stdout.split("\n").find((l) => l.includes(id));
+    assert.ok(lsLine, ls.stdout);
+    assert.match(lsLine!, /\baccepted\b/);
+  });
+
+  test("mc assess: refuses a non-terminal run, missing --by, an unknown --disposition, and a missing --evidence file", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const assessMc = (...extra: string[]) =>
+      spawnSync(process.execPath, [entry, "assess", ...extra], { encoding: "utf8", env: { ...process.env } });
+
+    // Non-terminal: review begins only after the process stops.
+    const runningId = "asrun001";
+    insertRun(
+      placeholderRun(runningId, {
+        exit: "running", ended_at: null, pid: process.pid, supervisor_pid: process.pid, notified: true,
+      }) as never,
+    );
+    const refusedRunning = assessMc(runningId, "--by", "alice", "--disposition", "accepted");
+    assert.equal(refusedRunning.status, 1);
+    assert.match(refusedRunning.stderr, /not terminal yet/);
+
+    const termId = "asterm01";
+    insertRun(placeholderRun(termId, { exit: "succeeded", notified: true }) as never);
+
+    // Missing --by: reviewer identity is never defaulted.
+    const noBy = assessMc(termId, "--disposition", "accepted");
+    assert.equal(noBy.status, 1);
+    assert.match(noBy.stderr, /--by is required/);
+
+    // Unknown --disposition: strict parsing, same style as --exit/--review.
+    const badDisposition = assessMc(termId, "--by", "alice", "--disposition", "maybe");
+    assert.equal(badDisposition.status, 1);
+    assert.match(badDisposition.stderr, /--disposition is required, one of: accepted, retry, blocked/);
+
+    // Missing evidence file: fail loudly rather than record a broken reference.
+    const missingEvidence = assessMc(
+      termId, "--by", "alice", "--disposition", "accepted", "--evidence", join(home, "does-not-exist.txt"),
+    );
+    assert.equal(missingEvidence.status, 1);
+    assert.match(missingEvidence.stderr, /--evidence file not found/);
+
+    // None of the refused attempts left a row behind.
+    const { assessmentsFor } = await import("../src/core/db.ts");
+    assert.equal(assessmentsFor(termId).length, 0);
+    assert.equal(assessmentsFor(runningId).length, 0);
+  });
+
+  test("mc assess: append-only - a second assessment appends rather than mutates, and the latest wins in ls/show", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const { assessmentsFor } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "append01";
+    insertRun(placeholderRun(id, { exit: "failed", notified: true }) as never);
+
+    const first = spawnSync(process.execPath, [entry, "assess", id, "--by", "bob", "--disposition", "retry"], {
+      encoding: "utf8", env: { ...process.env },
+    });
+    assert.equal(first.status, 0, first.stderr);
+    const second = spawnSync(
+      process.execPath,
+      [entry, "assess", id, "--by", "carol", "--disposition", "blocked", "--note", "correction"],
+      { encoding: "utf8", env: { ...process.env } },
+    );
+    assert.equal(second.status, 0, second.stderr);
+
+    const rows = assessmentsFor(id);
+    assert.equal(rows.length, 2); // both rows survive - the first was never mutated
+    assert.equal(rows[0]!.reviewer, "bob");
+    assert.equal(rows[0]!.disposition, "retry");
+    assert.equal(rows[1]!.reviewer, "carol");
+    assert.equal(rows[1]!.disposition, "blocked");
+
+    const ls = spawnSync(process.execPath, [entry, "ls"], { encoding: "utf8", env: { ...process.env } });
+    const lsLine = ls.stdout.split("\n").find((l) => l.includes(id));
+    assert.ok(lsLine, ls.stdout);
+    assert.match(lsLine!, /\bblocked\b/); // the LATEST disposition, not the first
+
+    const show = spawnSync(process.execPath, [entry, "show", id], { encoding: "utf8", env: { ...process.env } });
+    assert.ok(show.stdout.includes("review=blocked"), show.stdout);
+    assert.ok(show.stdout.includes("bob -> retry"), show.stdout); // full history still visible
+    assert.ok(show.stdout.includes("carol -> blocked"), show.stdout);
+  });
+
+  test("mc assess --at: verifies against the run's git workdir when it exists, refuses a SHA that doesn't resolve, and accepts an unverified full SHA once the workdir is gone", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const repo = mkdtempSync(join(tmpdir(), "mc-assess-at-"));
+    try {
+      spawnSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
+      writeFileSync(join(repo, "f.txt"), "seed\n");
+      spawnSync(
+        "sh",
+        ["-c", `git -C ${repo} add -A && git -C ${repo} -c user.email=t@t -c user.name=t commit -q -m seed`],
+        { stdio: "ignore" },
+      );
+      const sha = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+
+      const id = "atgit001";
+      insertRun(placeholderRun(id, { exit: "succeeded", workdir: repo, notified: true }) as never);
+
+      const bad = spawnSync(process.execPath, [entry, "assess", id, "--by", "dan", "--disposition", "accepted", "--at", "deadbeef"], {
+        encoding: "utf8", env: { ...process.env },
+      });
+      assert.equal(bad.status, 1);
+      assert.match(bad.stderr, /does not resolve to a commit/);
+
+      const good = spawnSync(process.execPath, [entry, "assess", id, "--by", "dan", "--disposition", "accepted", "--at", sha], {
+        encoding: "utf8", env: { ...process.env },
+      });
+      assert.equal(good.status, 0, good.stderr);
+      const printed = JSON.parse(good.stdout);
+      assert.equal(printed.checkpoint_sha, sha);
+      assert.equal(printed.note, null); // verified successfully - no unverified marker
+
+      // Now the workdir is gone entirely (pruned) - a full 40-char hex SHA is
+      // accepted AS-IS, with a note recording it was never actually checked.
+      const goneId = "atgone01";
+      insertRun(placeholderRun(goneId, { exit: "succeeded", workdir: join(home, "long-gone-workdir"), notified: true }) as never);
+      const unverified = spawnSync(
+        process.execPath,
+        [entry, "assess", goneId, "--by", "dan", "--disposition", "accepted", "--at", sha],
+        { encoding: "utf8", env: { ...process.env } },
+      );
+      assert.equal(unverified.status, 0, unverified.stderr);
+      const unverifiedPrinted = JSON.parse(unverified.stdout);
+      assert.equal(unverifiedPrinted.checkpoint_sha, sha);
+      assert.ok(String(unverifiedPrinted.note).includes("unverified"), unverifiedPrinted.note);
+
+      // A non-hex / short value is refused outright once there's no git to check against.
+      const shortSha = spawnSync(
+        process.execPath,
+        [entry, "assess", goneId, "--by", "dan", "--disposition", "accepted", "--at", "abc123"],
+        { encoding: "utf8", env: { ...process.env } },
+      );
+      assert.equal(shortSha.status, 1);
+      assert.match(shortSha.stderr, /must be a full 40-char hex SHA/);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("mc ls --review filters by latest disposition, treats a terminal run with no assessment as pending, and excludes non-terminal runs", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const pendingId = "revpend1";
+    insertRun(placeholderRun(pendingId, { exit: "succeeded", notified: true }) as never); // terminal, never assessed
+    const acceptedId = "revacc01";
+    insertRun(placeholderRun(acceptedId, { exit: "succeeded", notified: true }) as never);
+    const activeId = "revact01";
+    insertRun(
+      placeholderRun(activeId, { exit: "running", ended_at: null, pid: process.pid, supervisor_pid: process.pid, notified: true }) as never,
+    );
+
+    const assess = spawnSync(process.execPath, [entry, "assess", acceptedId, "--by", "eve", "--disposition", "accepted"], {
+      encoding: "utf8", env: { ...process.env },
+    });
+    assert.equal(assess.status, 0, assess.stderr);
+
+    const mcLs = (...extra: string[]) =>
+      spawnSync(process.execPath, [entry, "ls", ...extra], { encoding: "utf8", env: { ...process.env } });
+
+    const pending = mcLs("--review", "pending", "--json");
+    assert.equal(pending.status, 0, pending.stderr);
+    const pendingRows = JSON.parse(pending.stdout) as { id: string }[];
+    assert.ok(pendingRows.some((r) => r.id === pendingId), pending.stdout);
+    assert.ok(!pendingRows.some((r) => r.id === acceptedId), pending.stdout);
+    assert.ok(!pendingRows.some((r) => r.id === activeId), pending.stdout); // active runs are never "pending"
+
+    const accepted = mcLs("--review", "accepted", "--json");
+    const acceptedRows = JSON.parse(accepted.stdout) as { id: string }[];
+    assert.ok(acceptedRows.some((r) => r.id === acceptedId), accepted.stdout);
+    assert.ok(!acceptedRows.some((r) => r.id === pendingId), accepted.stdout);
+
+    // The active run shows "-" in the human table, not "pending".
+    const table = mcLs();
+    const activeLine = table.stdout.split("\n").find((l) => l.includes(activeId));
+    assert.ok(activeLine, table.stdout);
+    assert.match(activeLine!, /running\s+-\s/);
+
+    // Unknown --review value fails loudly, same style as --exit.
+    const badReview = mcLs("--review", "verdict");
+    assert.equal(badReview.status, 1);
+    assert.match(badReview.stderr, /unknown --review value "verdict"/);
+  });
+
+  test("mc assess: notification dispatches through [notify.assessment] only, never through [notify]", async () => {
+    const { insertRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    const assessmentCounter = join(home, "assessment-notify.json");
+    const runCounter = join(home, "run-hook-invocations.txt");
+
+    const id = "notifyas1";
+    // Already notified at the RUN level (obligation discharged) so this test
+    // exercises only the assessment seam, not an unrelated pending run push.
+    insertRun(placeholderRun(id, { exit: "succeeded", notified: true }) as never);
+
+    try {
+      writeFileSync(
+        configPath,
+        `[notify]\nexec = "printf x >> ${runCounter}"\n[notify.assessment]\nexec = "cat > ${assessmentCounter}"\n`,
+      );
+
+      const res = spawnSync(process.execPath, [entry, "assess", id, "--by", "frank", "--disposition", "accepted"], {
+        encoding: "utf8", env: { ...process.env },
+      });
+      assert.equal(res.status, 0, res.stderr);
+
+      const payload = JSON.parse(readFileSync(assessmentCounter, "utf8"));
+      assert.equal(payload.topic, "assessment_recorded");
+      assert.equal(payload.run.id, id);
+      assert.equal(payload.assessment.reviewer, "frank");
+      assert.equal(payload.assessment.disposition, "accepted");
+
+      // The [notify] (run-level) hook must NEVER have fired from `mc assess`.
+      assert.ok(!existsSync(runCounter), "the [notify] hook fired for an assessment - it must only ever fire for terminal runs");
+
+      const { assessmentsFor } = await import("../src/core/db.ts");
+      assert.equal(assessmentsFor(id)[0]!.notified, true);
+    } finally {
+      writeFileSync(configPath, original);
+    }
+  });
+
+  test("mc assess: a failed [notify.assessment] delivery leaves the row unnotified, and mc reap retries it", async () => {
+    const { insertRun, assessmentsFor } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    const counterPath = join(home, "assess-retry-counter.txt");
+
+    const id = "assretry";
+    insertRun(placeholderRun(id, { exit: "succeeded", notified: true }) as never);
+
+    try {
+      // Drains stdin, always fails delivery.
+      writeFileSync(configPath, `[notify.assessment]\nexec = "cat >/dev/null; printf x >> ${counterPath}; exit 1"\n`);
+
+      const res = spawnSync(process.execPath, [entry, "assess", id, "--by", "grace", "--disposition", "blocked"], {
+        encoding: "utf8", env: { ...process.env },
+      });
+      assert.equal(res.status, 0, res.stderr);
+      assert.equal(readFileSync(counterPath, "utf8"), "x");
+      assert.equal(assessmentsFor(id)[0]!.notified, false); // NOT discharged - a later reap must retry
+
+      const reap = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(reap.status, 0, reap.stderr);
+      assert.match(reap.stdout, /settled \d+ assessment notification/);
+      assert.equal(readFileSync(counterPath, "utf8"), "xx"); // retried
+      assert.equal(assessmentsFor(id)[0]!.notified, false); // still failing every time
+    } finally {
+      writeFileSync(configPath, original);
+    }
+  });
+
+  test("mc init: writes [notify]/[notify.assessment] idempotently (byte-identical on a second run) and reports synthetic verification", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-"));
+    try {
+      const hookOut = join(initHome, "hook-out.json");
+      const env = { ...process.env, MC_HOME: initHome };
+      const runInit = () =>
+        spawnSync(
+          process.execPath,
+          [
+            entry, "init",
+            "--notify-exec", `cat > ${hookOut}`,
+            "--assessment-webhook", "https://example.invalid/assessment-hook",
+          ],
+          { encoding: "utf8", env },
+        );
+
+      const first = runInit();
+      assert.equal(first.status, 0, first.stderr);
+      assert.ok(first.stdout.includes("wrote"), first.stdout);
+      // The exec hook is real and drains stdin cleanly -> verification succeeds.
+      assert.ok(first.stdout.includes("[notify] verification: OK (delivered)"), first.stdout);
+      // example.invalid never resolves -> verification honestly reports failure.
+      assert.ok(first.stdout.includes("[notify.assessment] verification: FAILED"), first.stdout);
+      const verifyPayload = JSON.parse(readFileSync(hookOut, "utf8"));
+      assert.equal(verifyPayload.test, true);
+      assert.equal(verifyPayload.note, "mc init verification");
+
+      const configPath = join(initHome, "config.toml");
+      const afterFirst = readFileSync(configPath, "utf8");
+      assert.ok(afterFirst.includes("[notify]"));
+      assert.ok(afterFirst.includes("[notify.assessment]"));
+
+      const second = runInit();
+      assert.equal(second.status, 0, second.stderr);
+      const afterSecond = readFileSync(configPath, "utf8");
+      assert.equal(afterSecond, afterFirst, "re-running mc init with the same flags must be byte-identical");
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init: preserves hand-authored sections it doesn't own, byte-for-byte", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-preserve-"));
+    try {
+      const env = { ...process.env, MC_HOME: initHome };
+      const configPath = join(initHome, "config.toml");
+      const handAuthored = `# a comment mc must never touch\n[gateway.myproxy]\nbase_url_openai = "https://llm.example.com/v1"\nenv_var = "MYPROXY_API_KEY"\n`;
+      writeFileSync(configPath, handAuthored);
+
+      const res = spawnSync(
+        process.execPath,
+        [entry, "init", "--notify-exec", `cat > ${join(initHome, "out.json")}`],
+        { encoding: "utf8", env },
+      );
+      assert.equal(res.status, 0, res.stderr);
+
+      const after = readFileSync(configPath, "utf8");
+      assert.ok(after.includes(handAuthored.trim()), after); // untouched, verbatim
+      assert.ok(after.includes("[notify]"), after);
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init --check: read-only, detects a broken hook path and exits nonzero without changing anything", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-check-"));
+    try {
+      const env = { ...process.env, MC_HOME: initHome };
+      const write = spawnSync(
+        process.execPath,
+        [entry, "init", "--notify-exec", join(initHome, "definitely-does-not-exist.sh")],
+        { encoding: "utf8", env },
+      );
+      assert.equal(write.status, 0, write.stderr); // init itself always writes+reports; never fails the process
+
+      const configPath = join(initHome, "config.toml");
+      const before = readFileSync(configPath, "utf8");
+
+      const check = spawnSync(process.execPath, [entry, "init", "--check"], { encoding: "utf8", env });
+      assert.equal(check.status, 1, check.stdout + check.stderr);
+      assert.match(check.stdout, /FAIL/);
+
+      const after = readFileSync(configPath, "utf8");
+      assert.equal(after, before, "mc init --check must never modify config.toml");
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init --check: a healthy, unconfigured setup passes and changes nothing", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-check-clean-"));
+    try {
+      const env = { ...process.env, MC_HOME: initHome };
+      const check = spawnSync(process.execPath, [entry, "init", "--check"], { encoding: "utf8", env });
+      assert.equal(check.status, 0, check.stdout + check.stderr);
+      assert.ok(!existsSync(join(initHome, "config.toml")), "init --check must never create config.toml");
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init --install-reap: adds a tagged, idempotent crontab entry (stubbed crontab, never the real one)", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-cron-"));
+    const stubDir = mkdtempSync(join(tmpdir(), "mc-crontab-stub-"));
+    try {
+      const store = join(initHome, "fake-crontab.txt");
+      // A minimal stand-in for the real `crontab` binary so this test can
+      // never touch whoever's actual crontab happens to run the suite.
+      // Supports exactly the two invocations mc's init uses: `-l` (list) and
+      // `-` (replace from stdin) - the same interface `crontab -e` users see.
+      writeFileSync(
+        join(stubDir, "crontab"),
+        `#!/bin/sh\nif [ "$1" = "-l" ]; then [ -f "${store}" ] && cat "${store}" || exit 1; elif [ "$1" = "-" ]; then cat > "${store}"; else exit 1; fi\n`,
+      );
+      chmodSync(join(stubDir, "crontab"), 0o755);
+
+      const env = { ...process.env, MC_HOME: initHome, PATH: `${stubDir}:${process.env.PATH}` };
+      const first = spawnSync(process.execPath, [entry, "init", "--install-reap"], { encoding: "utf8", env });
+      assert.equal(first.status, 0, first.stderr);
+      assert.ok(first.stdout.includes("added reap entry"), first.stdout);
+      const afterFirst = readFileSync(store, "utf8");
+      assert.ok(afterFirst.includes("# mission-control-reap"), afterFirst);
+      assert.ok(afterFirst.includes("reap"), afterFirst);
+
+      const second = spawnSync(process.execPath, [entry, "init", "--install-reap"], { encoding: "utf8", env });
+      assert.equal(second.status, 0, second.stderr);
+      assert.ok(second.stdout.includes("already present"), second.stdout);
+      const afterSecond = readFileSync(store, "utf8");
+      assert.equal(
+        afterSecond.split("\n").filter((l) => l.includes("mission-control-reap")).length,
+        1,
+        "a second --install-reap must never duplicate the crontab line",
+      );
+
+      // `mc init --check` picks up the same stubbed crontab and reports presence.
+      const check = spawnSync(process.execPath, [entry, "init", "--check"], { encoding: "utf8", env });
+      assert.ok(check.stdout.includes("crontab reap entry: present"), check.stdout);
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+      rmSync(stubDir, { recursive: true, force: true });
     }
   });
 });

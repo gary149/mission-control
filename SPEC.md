@@ -140,6 +140,71 @@ task_updated | task_notification | background_tasks_changed`, shapes captured li
 codex has no subagent events, pi's agent_* chatter is single-agent lifecycle, and
 kimi-code's CLI never writes subagent events to stdout (upstream #2130).
 
+### Assessments
+
+`exit` is a process fact; it was never a quality judgment (see "Verification (removed)"
+below and Run's own description above). Assessments are the answer to the gap that
+removal leaves: an attributed, append-only judgment a REVIEWER records against a
+TERMINAL run, in its own table alongside `runs`/`events` - added under the same
+no-migrations discipline (`CREATE TABLE IF NOT EXISTS`), never mutating either of the
+other two:
+
+```sql
+CREATE TABLE IF NOT EXISTS assessments (
+  run_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  ts TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  disposition TEXT NOT NULL,          -- accepted | retry | blocked
+  checkpoint_sha TEXT,                -- optional; verified via git when the workdir survives
+  evidence TEXT NOT NULL,             -- JSON [{path, sha256}], sha256 computed at write time
+  note TEXT,
+  observed TEXT,                      -- what MC saw: os user@host, distinct from `reviewer`
+  notified INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (run_id, seq)
+);
+```
+
+Principles (load-bearing - the CLI, docs, and tests all encode these; see db.ts):
+
+- **Append-only.** A correction is a NEW row at a higher `seq`, never an UPDATE of an
+  earlier one. There is no `updateAssessment`. The full history - who claimed what and
+  when, including anything later superseded - stays on the record; `mc show <id>`
+  prints it oldest-first in full, not just the latest.
+- **`pending_review` is the ABSENCE of a row, not a stored value.** No disposition is
+  ever named `"pending"`; mc computes it at read time (`mc ls`/`mc show`) by finding
+  zero assessment rows for a terminal run. A non-terminal run shows `-`, not
+  `pending`: review begins only after the process stops (`mc assess` refuses queued/
+  running runs by name).
+- **mc validates STRUCTURE, never the JUDGMENT.** `mc assess` checks that the run is
+  terminal, `--by` is present, `--disposition` is one of the three literal values, and
+  any `--evidence` files actually exist (mc hashes them - sha256 - at write time;
+  content is never stored, only path + hash). It never checks whether `accepted` was
+  the *right* call. Rubber-stamping is permitted BY DESIGN: `reviewer` and `observed`
+  give the record PROVENANCE (who claimed it, and what mc itself independently saw
+  while recording it - the executing os user@host, a distinct column from the
+  asserted `reviewer`), not trust in the claim. mc is a ledger of who said what, never
+  a judge of whether they were right to say it.
+- **`reviewer` is an asserted identity - mandatory, never defaulted.** `--by` has no
+  fallback to the OS user or anything else; omitting it fails loudly. Defaulting it
+  would silently convert "who is claiming this" into "whoever happened to run the
+  command," destroying the one thing attribution is for.
+- **No internal mc code path may ever WRITE an assessment.** `mc assess` (a human- or
+  orchestrator-invoked CLI command) is the only writer this table has, or will ever
+  have. The supervisor, `mc reap`, `mc kill`, the notify seams - none of them may
+  assess a run on mc's own initiative. An assessment that mc generated itself would
+  not be an assessment; it would just be `exit` wearing a different name.
+- **`--at SHA` records a checkpoint, verified when possible.** If the run's workdir
+  still exists and is a git repo, mc runs `git rev-parse --verify` there and refuses a
+  SHA that doesn't resolve. If the workdir has been pruned or never was git, mc
+  accepts a full 40-character hex SHA as-is (refusing anything shorter or
+  non-hex) and records in `note` that it went unverified - an honest gap, not a
+  silent one.
+
+See "Assessment notifications" under Notifications (below) for how recording one
+dispatches a push, and `docs/integrations/merge-queue.md` for the canonical consumer:
+gating automated landing on `disposition == "accepted"` instead of on `exit`.
+
 ### HarnessAdapter
 
 One TS module per harness. No invented wire protocol in v1; each adapter wraps the CLI's
@@ -348,7 +413,9 @@ belongs: with the operator or the orchestrating agent actually looking at the re
 `--artifact` survives as a declared-deliverable hint injected into the prompt (harnesses
 still need to know where to write), it just isn't checked afterward. Vision-based
 verification (render + inspect), previously slated as a v2 extension of this system, is
-moot along with it.
+moot along with it. Assessments (below) are the deliberately separate answer to "where
+does that judgment go once someone makes it": an attributed record of the operator's or
+orchestrator's own review, never a second thing mc computes on its own.
 
 ### Workspace isolation
 
@@ -514,10 +581,11 @@ The CLI is a surface, not the product. Structure enforces this:
   exported as a typed library API. It never parses argv and never prints.
 - **Surfaces are thin bindings over core**: `src/cli.ts` and `src/mcp.ts` in v1. A future
   surface (HTTP API, TUI, desktop app, claw plugin) is another small binding, not a rewrite.
-- **The durable contract is data, not code**: the SQLite schema (`runs`, `events`), the
-  run-dir layout on disk, and the closed event union. Any tool in any language can
-  integrate by reading those (the agentsview pattern: daemon optional, state readable
-  straight from SQLite), so replacing or adding a frontend never touches the engine.
+- **The durable contract is data, not code**: the SQLite schema (`runs`, `events`,
+  `assessments`), the run-dir layout on disk, and the closed event union. Any tool in
+  any language can integrate by reading those (the agentsview pattern: daemon
+  optional, state readable straight from SQLite), so replacing or adding a frontend
+  never touches the engine.
 
 ## Surfaces
 
@@ -527,19 +595,39 @@ The CLI is a surface, not the product. Structure enforces this:
 mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N] [--max-idle-minutes N]
           [--gateway NAME | --api-key] [--artifact PATH]... [--effort E] "prompt"
 mc run    --spec -            # full RunSpec as JSON on stdin (the remote-safe form)
-mc ls     [--json]
-mc show   <run-id>            # full record, recent events, cost
+mc ls     [--json] [--exit STATE,...] [--review DISPOSITION,...]
+mc show   <run-id>            # full record, recent events, cost, full assessment history
 mc tail   <run-id>            # follow the event stream
 mc kill   <run-id>
 mc resume <run-id> [--fresh [--at SHA]] "follow-up"
                               # new linked run inheriting the parent's spec; default =
                               # native session resume, --fresh = checkpoint restart
+mc assess <run-id> --by REVIEWER --disposition accepted|retry|blocked
+          [--at SHA] [--evidence PATH]... [--note TEXT]
+                              # append an attributed review receipt; see "Assessments" above
 mc reap                       # cron-safe: mark dead-supervisor runs lost, deliver
-                              # pending notifications (push must not depend on `mc ls`)
+                              # pending run AND assessment notifications (push must not
+                              # depend on `mc ls`)
 mc harness ls                 # adapters + capabilities + detection (installed? path? version?)
 mc harness check <name>       # live end-to-end check of one adapter against the real CLI
+mc init   [--notify-exec PATH | --notify-webhook URL]
+          [--assessment-exec PATH | --assessment-webhook URL] [--install-reap]
+                              # idempotent config.toml writer for [notify]/[notify.assessment];
+                              # verifies each hook with a synthetic test push rather than
+                              # assuming it works; --install-reap adds the cron entry
+mc init --check                # read-only: config/hook/crontab health + a dry test dispatch;
+                              # exits nonzero if anything looks broken, changes nothing
 mc cost   [--since 7d]        # per-run and aggregate spend from the ledger
 ```
+
+**Why `mc init` exists.** The fleet audit behind this design found five independent
+operators who had configured a notify hook that silently never fired - a typo'd path,
+a script that forgot to read stdin, a webhook URL that 404'd - and only discovered it
+much later, by absence. `mc init` writes the config AND immediately fires a synthetic
+`{test: true, note: "mc init verification"}` push through every hook it just named,
+reporting delivered/not delivered honestly. `mc init --check` is the same verification
+run read-only, any time later, for CI or a periodic health check. Verify, don't
+assume.
 
 There is no SSH code in mc. Remote machines run their own install, and the caller owns
 transport. The remote-safe invocation is `ssh box mc run --spec - < task.json` (spec over
@@ -571,12 +659,32 @@ excerpt - so an orchestrator never has to round-trip through `mc show` to learn 
 went wrong. One notification per terminal transition, deduped by run id. Claw
 integrations are configs, not code.
 
+#### Assessment notifications (a separate seam)
+
+```toml
+[notify.assessment]
+exec    = ""                                  # optional: command receiving payload on stdin
+webhook = ""                                  # optional: POST target
+```
+
+Every successful `mc assess` dispatches `{topic: "assessment_recorded", run: <full run
+record>, assessment: <the new row>}` through `[notify.assessment]` - and ONLY through
+it, never through the top-level `[notify]` above. This is deliberate, not an
+oversight: `[notify]` payloads assume a terminal-run shape, and an integration built
+against that shape (reading `.exit`, `.cost_usd`, ...) could misfire if an assessment
+payload landed on the same hook. Delivery truth lives on the assessment row's own
+`notified` flag - same stdin-fully-read/exit-0 semantics as the run seam above,
+sharing its delivery machinery (see notify.ts) rather than duplicating it - and `mc
+reap` retries any assessment still `notified = 0` exactly the way it retries a failed
+run notification. `mc init` writes, and verifies with a synthetic test push, both
+`[notify]` and `[notify.assessment]` (see "mc init" below).
+
 ## Storage layout
 
 ```
 ~/.mission-control/
   config.toml
-  mc.db                # runs, events (WAL; single host, single writer discipline)
+  mc.db                # runs, events, assessments (WAL; single host, single writer discipline)
   runs/<run-id>/
     spec.json          # archived launch spec
     work/              # workdir (or a git worktree pointer)
