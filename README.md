@@ -68,6 +68,7 @@ claimed.
 mc run --harness H [--model M] [--gateway openrouter] [--budget 99] \
        [--max-minutes 360] [--max-idle-minutes 30] [--artifact PATH] "task"
 mc ls                        # every run: exit + cost + tokens + duration
+mc ls --exit running         # filter by state (comma-separated: --exit failed,killed,lost)
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
 mc show <id>                 # full record + recent events
 mc resume <id> "add tests"   # continue the session, new linked run, same workdir

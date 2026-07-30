@@ -34,6 +34,8 @@ same way you would for any other delegated work.
   db (below) is always there. `mc show <id>` is for inspection - a JSON record followed
   by human-formatted summary lines - so do not pipe it to a JSON parser. Never parse
   the human table either; it is for humans and it will change.
+- Filter on state directly instead of post-filtering JSON: `mc ls --exit running`,
+  `mc ls --exit failed,killed,lost` (composes with `--json`).
 - **Look at the actual output before discarding a run, `killed` included.** A `killed`
   run's workdir still holds whatever the harness had written up to that point - real
   progress, not garbage. If the record has a `session_id`, `mc resume <id>` continues
