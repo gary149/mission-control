@@ -245,8 +245,8 @@ runbook knowledge currently scattered across skill files, made executable:
   no session-start, no turn-complete, and no token/cost telemetry; the trailing
   `session.resume_hint` meta line is the only end-of-run marker and doubles as
   `turn_end` + session capture - if kimi drops it (upstream #1897, signal shutdown),
-  the run degrades to `unverifiable`, the correct fail direction. Failures exit 1
-  with an empty stdout. Subscription (Kimi OAuth) is deferred until a real
+  the run still completes normally, just with no `session_id` captured (no native
+  resume possible afterward). Failures exit 1 with an empty stdout. Subscription (Kimi OAuth) is deferred until a real
   `kimi login` exists to verify the credential layout against.
 - **opencode** (grounded in 1.18.7, probed live): `run --format json --auto` - one
   `{type, timestamp, sessionID, part}` envelope per line, sessionID on EVERY line, six
