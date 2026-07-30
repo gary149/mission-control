@@ -49,31 +49,7 @@ export function openDb() {
       PRIMARY KEY (run_id, seq)
     );
   `);
-    migrate(db);
     return db;
-}
-/**
- * Legacy columns from the verifier (removed from the schema and from every
- * read/write path) that may still exist on a database created before this
- * change. Deliberately NEVER dropped: a DROP COLUMN here would silently
- * destroy every historical verdict on a real fleet ledger the moment an
- * upgraded `mc` opens it, which is a far bigger and less reversible action
- * than the feature removal itself asked for. `verdict` was `NOT NULL` with
- * no DEFAULT, so an old database's constraint must still be satisfied on
- * every future insert - see insertRun, which appends a harmless placeholder
- * for exactly the columns recorded here, and only for them.
- */
-let legacyVerdictColumns = [];
-/** Rename-only migrations for pre-claude-shape databases (goal/session_ref era). */
-function migrate(d) {
-    const columns = d.prepare("PRAGMA table_info(runs)").all().map((c) => c.name);
-    if (columns.includes("goal"))
-        d.exec("ALTER TABLE runs RENAME COLUMN goal TO prompt");
-    if (columns.includes("session_ref"))
-        d.exec("ALTER TABLE runs RENAME COLUMN session_ref TO session_id");
-    if (!columns.includes("max_idle_minutes"))
-        d.exec("ALTER TABLE runs ADD COLUMN max_idle_minutes REAL");
-    legacyVerdictColumns = ["verdict", "verify_evidence"].filter((c) => columns.includes(c));
 }
 /** Test-only: drop the cached handle so a new MC_HOME takes effect. */
 export function resetDbForTest() {
@@ -96,20 +72,13 @@ const RUN_COLUMNS = [
     "auth_mode", "gateway", "pid", "supervisor_pid", "stderr_path", "artifacts", "notified",
 ];
 export function insertRun(run) {
-    openDb(); // ensures migrate() has run and legacyVerdictColumns is current for this MC_HOME
     const params = dollarKeys({
         ...run,
         artifacts: JSON.stringify(run.artifacts),
         notified: run.notified ? 1 : 0,
-        // Placeholder values ONLY for legacy NOT NULL columns still present on
-        // this specific database (see legacyVerdictColumns) - satisfies the old
-        // constraint without mc ever computing or reading a real verdict again.
-        ...(legacyVerdictColumns.includes("verdict") ? { verdict: "n/a" } : {}),
-        ...(legacyVerdictColumns.includes("verify_evidence") ? { verify_evidence: null } : {}),
     });
-    const allColumns = [...RUN_COLUMNS, ...legacyVerdictColumns];
-    const columns = allColumns.join(", ");
-    const placeholders = allColumns.map((c) => `$${c}`).join(", ");
+    const columns = RUN_COLUMNS.join(", ");
+    const placeholders = RUN_COLUMNS.map((c) => `$${c}`).join(", ");
     openDb().prepare(`INSERT INTO runs (${columns}) VALUES (${placeholders})`).run(params);
 }
 export function updateRun(id, fields) {
