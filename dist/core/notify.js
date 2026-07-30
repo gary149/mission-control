@@ -17,7 +17,10 @@ async function dispatch(payload, target) {
     const channels = {};
     if (target.exec) {
         channels.exec = await new Promise((resolveWait) => {
-            const child = spawn("sh", ["-c", target.exec], { stdio: ["pipe", "ignore", "ignore"] });
+            // `detached: true` makes this child a process GROUP leader (POSIX),
+            // not just an isolated process - see the timeout handler below for why
+            // that matters.
+            const child = spawn("sh", ["-c", target.exec], { stdio: ["pipe", "ignore", "ignore"], detached: true });
             // A hook that exits without draining stdin makes the write below raise
             // EPIPE. An 'error' event on an EventEmitter with no listener is fatal
             // to the WHOLE process (not just this promise) - and since it happens
@@ -40,7 +43,20 @@ async function dispatch(payload, target) {
             let timedOut = false;
             const timer = setTimeout(() => {
                 timedOut = true;
-                child.kill("SIGKILL");
+                // Kill the whole process GROUP, not just the immediate `sh` - a hook
+                // that itself spawns or backgrounds a child (a pipeline, `cmd &`, a
+                // compound `;` sequence sh doesn't exec-replace itself for) would
+                // otherwise survive this timeout entirely, undetected, and could go
+                // on attempting delivery after mc has already declared the attempt
+                // timed out and moved on. Mirrors cli.ts's killGroupOrPid for the
+                // harness's own process tree; fall back to a bare signal only if the
+                // group signal itself is unavailable (child.pid missing/already gone).
+                try {
+                    process.kill(-child.pid, "SIGKILL");
+                }
+                catch {
+                    child.kill("SIGKILL");
+                }
             }, 15_000);
             try {
                 // write()/end() do not throw synchronously for EPIPE in practice (it
@@ -227,9 +243,19 @@ export async function notifyAssessment(run, assessment, config) {
  * from a real push on the receiving end. Reuses the identical dispatch
  * mechanics as every real notification, so a hook that passes this check has
  * been exercised the same way it will be exercised for real.
+ *
+ * Returns the RAW per-channel result, not a reduced boolean - deliberately
+ * different from notifyTerminal/notifyAssessment's "any channel delivered =
+ * obligation discharged" reading. That reading is correct for a REAL push
+ * (one working channel is enough for the run to actually get noticed), but
+ * wrong for a health check auditing a hand-authored section with BOTH exec
+ * and webhook configured: if only one of the two actually works, a caller
+ * that collapsed this to "any" would report the section healthy while one
+ * configured channel is silently broken. cli.ts's callers decide the
+ * all-vs-any policy themselves (see channelsAllOk) - this function only
+ * reports what happened.
  */
 export async function sendTest(target) {
     const payload = JSON.stringify({ test: true, note: "mc init verification" });
-    const channels = await dispatch(payload, target);
-    return anyDelivered(channels);
+    return dispatch(payload, target);
 }

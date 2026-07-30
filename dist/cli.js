@@ -8,7 +8,7 @@ import { text } from "node:stream/consumers";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ADAPTERS, getAdapter } from "./core/adapters/registry.js";
 import { checkGatewayModelServed, resolveAuth } from "./core/auth.js";
-import { ensureHome, loadConfig, mcHome } from "./core/config.js";
+import { ensureHome, loadConfig, malformedLines, mcHome, quoteTomlString } from "./core/config.js";
 import { assessmentsFor, eventsAfter, findRun, insertAssessment, latestAssessment, listRuns, markLost, getRun, insertEvent, unnotifiedAssessments, } from "./core/db.js";
 import { launch } from "./core/launch.js";
 import { notifyAssessment, notifyTerminal, sendTest } from "./core/notify.js";
@@ -638,6 +638,10 @@ function reapCronStatus() {
  * (see readCrontab) - better to fail the install loudly than risk clobbering
  * a crontab mc failed to see the real contents of.
  */
+/** Single-quote a value for embedding in a crontab line's own shell command, escaping any embedded single quotes. */
+function shellQuoteSingle(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
 function installReapCron() {
     const read = readCrontab();
     if (!read.ok) {
@@ -650,7 +654,15 @@ function installReapCron() {
         return { status: "already-present", detail: "already present" };
     }
     const mcPath = realpathSync(process.argv[1]);
-    const line = `*/10 * * * * ${mcPath} reap ${REAP_CRON_TAG}`;
+    // Cron jobs run with their OWN minimal environment, not this process's -
+    // an MC_HOME override active when `--install-reap` runs (a relocated state
+    // dir, a test rig) would otherwise silently vanish from the cron job,
+    // which would then reap against the DEFAULT ~/.mission-control instead of
+    // wherever this invocation was actually configured against. Embed it
+    // explicitly, shell-quoted, only when it's actually set - the unset case
+    // already resolves to the same default under cron's own HOME.
+    const envPrefix = process.env.MC_HOME ? `MC_HOME=${shellQuoteSingle(process.env.MC_HOME)} ` : "";
+    const line = `*/10 * * * * ${envPrefix}${mcPath} reap ${REAP_CRON_TAG}`;
     const next = read.text.length > 0 && !read.text.endsWith("\n") ? `${read.text}\n${line}\n` : `${read.text}${line}\n`;
     const r = spawnSync("crontab", ["-"], { input: next, encoding: "utf8" });
     if (r.status !== 0)
@@ -679,6 +691,30 @@ function execTargetStatus(exec) {
     return { path: bin, executable };
 }
 /**
+ * Whether EVERY configured channel in a sendTest() result delivered - the
+ * health-check policy, deliberately stricter than notifyTerminal/
+ * notifyAssessment's real-delivery "any channel is enough" policy (see
+ * notify.ts's sendTest doc comment for why the two must differ): a
+ * hand-authored section with both exec and webhook configured is only
+ * genuinely healthy if BOTH work, not if one silently covers for the other.
+ */
+function channelsAllOk(channels) {
+    const names = Object.keys(channels);
+    return names.length > 0 && names.every((n) => Boolean(channels[n]?.delivered));
+}
+/** Per-channel human summary for a sendTest() result, e.g. "exec=OK, webhook=FAILED (status 500)". */
+function channelSummary(channels) {
+    return Object.entries(channels)
+        .map(([name, result]) => {
+        const r = result;
+        if (r?.delivered)
+            return `${name}=OK`;
+        const detail = r?.error ?? (r?.status != null ? `status ${r.status}` : r?.exit_code != null ? `exit ${r.exit_code}` : "not delivered");
+        return `${name}=FAILED (${detail})`;
+    })
+        .join(", ");
+}
+/**
  * Read-only diagnosis: config.toml parseability, hook file existence/
  * executability, crontab entry presence, and a dry test dispatch through
  * every configured hook - changes NOTHING. Exits nonzero the moment anything
@@ -695,9 +731,10 @@ async function initCheck() {
         if (!ok)
             broken = true;
     };
+    let configText = "";
     if (existsSync(configPath)) {
         try {
-            readFileSync(configPath, "utf8");
+            configText = readFileSync(configPath, "utf8");
             report(true, `${configPath} is readable`);
         }
         catch (error) {
@@ -709,17 +746,29 @@ async function initCheck() {
     }
     const config = loadConfig();
     const targets = [
-        ["[notify]", config.notify],
-        ["[notify.assessment]", config.notify.assessment],
+        ["[notify]", config.notify, "notify"],
+        ["[notify.assessment]", config.notify.assessment, "notify.assessment"],
     ];
-    for (const [label, target] of targets) {
+    for (const [label, target, sectionName] of targets) {
+        // loadConfig()/parseToml() are lenient BY DESIGN (a malformed line is
+        // skipped, not fatal to the whole file) - but that means a hook that
+        // failed to parse (e.g. an unterminated quoted string) is INDISTINGUISHABLE
+        // from "nothing configured" once it reaches `target.exec`/`target.webhook`
+        // as null. Check the raw text directly for that specific failure before
+        // trusting the parsed (and therefore possibly silently-emptied) result.
+        const badLines = configText ? malformedLines(configText, sectionName) : [];
+        if (badLines.length > 0) {
+            report(false, `${label} has a line that failed to parse (check for an unterminated quoted string): ${badLines[0]}`);
+            continue; // nothing usable was actually extracted; the checks below would just report "nothing configured"
+        }
         if (target.exec) {
             const status = execTargetStatus(target.exec);
             if (status)
                 report(status.executable, `${label} exec target is executable (${status.path})`);
         }
         if (target.exec || target.webhook) {
-            report(await sendTest(target), `${label} dry test dispatch delivered`);
+            const channels = await sendTest(target);
+            report(channelsAllOk(channels), `${label} dry test dispatch delivered (${channelSummary(channels)})`);
         }
     }
     // Crontab presence is informational only - not opting into --install-reap
@@ -785,13 +834,20 @@ async function runInit(args) {
     const configPath = join(mcHome(), "config.toml");
     const existing = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
     let text = existing;
+    // quoteTomlString escapes backslashes/quotes so an exec command containing
+    // either (e.g. `cat > "a file.json"`) round-trips through config.toml
+    // instead of producing invalid TOML that silently truncates on read-back
+    // (raw interpolation used to do exactly that).
     if (notifyExec || notifyWebhook) {
-        text = upsertTomlSection(text, "notify", [notifyExec ? `exec = "${notifyExec}"` : null, notifyWebhook ? `webhook = "${notifyWebhook}"` : null].filter((l) => l !== null));
+        text = upsertTomlSection(text, "notify", [
+            notifyExec ? `exec = ${quoteTomlString(notifyExec)}` : null,
+            notifyWebhook ? `webhook = ${quoteTomlString(notifyWebhook)}` : null,
+        ].filter((l) => l !== null));
     }
     if (assessmentExec || assessmentWebhook) {
         text = upsertTomlSection(text, "notify.assessment", [
-            assessmentExec ? `exec = "${assessmentExec}"` : null,
-            assessmentWebhook ? `webhook = "${assessmentWebhook}"` : null,
+            assessmentExec ? `exec = ${quoteTomlString(assessmentExec)}` : null,
+            assessmentWebhook ? `webhook = ${quoteTomlString(assessmentWebhook)}` : null,
         ].filter((l) => l !== null));
     }
     if (text !== existing) {
@@ -813,16 +869,24 @@ async function runInit(args) {
     // already written above regardless of what happens here (verification
     // failing does not mean the write itself failed); what changes is the
     // process's own exit code, tracked in `anyFailed` below.
+    // Every configured channel must actually deliver here, not just "any one
+    // of them" - notifyTerminal/notifyAssessment's real-delivery policy treats
+    // one working channel as enough (a real push only needs to land somewhere),
+    // but a health check auditing a section with BOTH exec and webhook set must
+    // not report OK while one of the two is silently broken. See notify.ts's
+    // sendTest doc comment.
     let anyFailed = false;
     if (notifyExec || notifyWebhook) {
-        const ok = await sendTest({ exec: notifyExec, webhook: notifyWebhook });
-        console.log(`[notify] verification: ${ok ? "OK (delivered)" : "FAILED (not delivered)"}`);
+        const channels = await sendTest({ exec: notifyExec, webhook: notifyWebhook });
+        const ok = channelsAllOk(channels);
+        console.log(`[notify] verification: ${ok ? "OK" : "FAILED"} (${channelSummary(channels)})`);
         if (!ok)
             anyFailed = true;
     }
     if (assessmentExec || assessmentWebhook) {
-        const ok = await sendTest({ exec: assessmentExec, webhook: assessmentWebhook });
-        console.log(`[notify.assessment] verification: ${ok ? "OK (delivered)" : "FAILED (not delivered)"}`);
+        const channels = await sendTest({ exec: assessmentExec, webhook: assessmentWebhook });
+        const ok = channelsAllOk(channels);
+        console.log(`[notify.assessment] verification: ${ok ? "OK" : "FAILED"} (${channelSummary(channels)})`);
         if (!ok)
             anyFailed = true;
     }
@@ -907,19 +971,28 @@ COMMANDS
                 launch, session_id, artifact content, cost/token extraction,
                 native resume
   init          Write/merge [notify] and [notify.assessment] into config.toml
-                (idempotent; preserves everything else in the file). Every
-                hook named verifies itself with a synthetic test push and
-                reports delivered/not - init never assumes a hook works.
+                (idempotent; preserves everything else in the file, values
+                TOML-escaped so quotes/backslashes round-trip). Every hook
+                named verifies itself with a synthetic test push - EVERY
+                configured channel (exec and/or webhook) must deliver, not
+                just one of them - and exits nonzero if any didn't; init
+                never assumes a hook works.
                 --notify-exec PATH | --notify-webhook URL
                                 Terminal-run push ([notify])
                 --assessment-exec PATH | --assessment-webhook URL
                                 Assessment-recorded push ([notify.assessment])
                 --install-reap  Adds "*/10 * * * * <mc path> reap" to this
                                 user's crontab, tagged "# mission-control-reap"
-                                (idempotent; remove by hand with crontab -e)
-  init --check  Read-only: config.toml readability, hook executability,
-                crontab entry presence, dry test dispatch. Changes nothing;
-                exits nonzero if anything configured looks broken.
+                                (idempotent; remove by hand with crontab -e;
+                                embeds MC_HOME= explicitly when this
+                                invocation's environment overrides it, since
+                                cron jobs don't inherit your shell's env)
+  init --check  Read-only: config.toml readability AND parseability (a
+                section that failed to parse - e.g. an unterminated quoted
+                string - is reported broken, not silently "unconfigured"),
+                hook executability, crontab entry presence, a dry test
+                dispatch requiring EVERY configured channel to deliver.
+                Changes nothing; exits nonzero if anything looks broken.
   help          This page (also: -h, --help anywhere)
 
 RUN OPTIONS

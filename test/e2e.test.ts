@@ -2318,8 +2318,8 @@ describe("mission-control e2e (stub harness)", () => {
       const first = runInit();
       assert.equal(first.status, 0, first.stderr);
       assert.ok(first.stdout.includes("wrote"), first.stdout);
-      assert.ok(first.stdout.includes("[notify] verification: OK (delivered)"), first.stdout);
-      assert.ok(first.stdout.includes("[notify.assessment] verification: OK (delivered)"), first.stdout);
+      assert.ok(first.stdout.includes("[notify] verification: OK (exec=OK)"), first.stdout);
+      assert.ok(first.stdout.includes("[notify.assessment] verification: OK (exec=OK)"), first.stdout);
       const verifyPayload = JSON.parse(readFileSync(notifyOut, "utf8"));
       assert.equal(verifyPayload.test, true);
       assert.equal(verifyPayload.note, "mc init verification");
@@ -2361,7 +2361,7 @@ describe("mission-control e2e (stub harness)", () => {
       // that doesn't actually work must make the PROCESS fail, not just print
       // "FAILED" and exit 0 for a script to miss.
       assert.equal(res.status, 1, res.stdout + res.stderr);
-      assert.ok(res.stdout.includes("[notify] verification: OK (delivered)"), res.stdout);
+      assert.ok(res.stdout.includes("[notify] verification: OK (exec=OK)"), res.stdout);
       assert.ok(res.stdout.includes("[notify.assessment] verification: FAILED"), res.stdout);
 
       // Config.toml is still written despite the failed verification - init
@@ -2398,6 +2398,115 @@ describe("mission-control e2e (stub harness)", () => {
     } finally {
       rmSync(initHome, { recursive: true, force: true });
     }
+  });
+
+  test("mc init: an exec value containing a double quote round-trips through config.toml (escaped, not silently truncated)", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-quote-"));
+    try {
+      // The realistic case that broke before: a path with a space needs
+      // quoting IN THE SHELL COMMAND, which embeds a literal `"` into the
+      // exec value mc then has to store inside config.toml's OWN quoted
+      // string. Raw interpolation produced `exec = "cat > "path""` - invalid
+      // TOML that the reader stopped at the first quote, silently dropping
+      // everything after it (never delivering again on the next read).
+      const spacedPath = join(initHome, "hook with spaces.json");
+      const trickyExec = `cat > "${spacedPath}"`;
+      const env = { ...process.env, MC_HOME: initHome };
+
+      const first = spawnSync(process.execPath, [entry, "init", "--notify-exec", trickyExec], {
+        encoding: "utf8", env,
+      });
+      assert.equal(first.status, 0, first.stderr);
+      assert.ok(first.stdout.includes("[notify] verification: OK"), first.stdout);
+      assert.ok(existsSync(spacedPath), "the FIRST invocation's own synthetic push must have actually run the command");
+
+      const configPath = join(initHome, "config.toml");
+      const configText = readFileSync(configPath, "utf8");
+      // The written line must carry an ESCAPED quote, not a raw one breaking
+      // the TOML string early.
+      assert.match(configText, /^exec = "cat > \\"/m, configText);
+      assert.ok(!configText.includes(`exec = "cat > "`), "a raw unescaped quote would silently truncate the value on read");
+
+      // The critical round-trip proof: a SEPARATE invocation re-reads
+      // config.toml from disk (not the in-memory value from the write above)
+      // and must recover the exact original command, not a truncated prefix.
+      rmSync(spacedPath); // so re-creation below proves the reloaded command actually ran again
+      const check = spawnSync(process.execPath, [entry, "init", "--check"], { encoding: "utf8", env });
+      assert.equal(check.status, 0, check.stdout + check.stderr);
+      assert.match(check.stdout, /\[notify\] dry test dispatch delivered \(exec=OK\)/);
+      assert.ok(existsSync(spacedPath), "the re-loaded exec value must still be the full, working original command");
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init --check: a config.toml section that failed to parse (unterminated quoted string) is reported broken, not silently treated as unconfigured", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-malformed-"));
+    try {
+      // loadConfig()/parseToml() are deliberately lenient - a line like this
+      // is silently SKIPPED rather than crashing the whole file - which means
+      // config.notify.exec ends up null, indistinguishable from "the operator
+      // never configured a hook at all" unless --check looks at the raw text.
+      writeFileSync(join(initHome, "config.toml"), `[notify]\nexec = "unterminated\n`);
+      const env = { ...process.env, MC_HOME: initHome };
+
+      const check = spawnSync(process.execPath, [entry, "init", "--check"], { encoding: "utf8", env });
+      assert.equal(check.status, 1, check.stdout + check.stderr);
+      assert.match(check.stdout, /FAIL.*\[notify\].*failed to parse/i);
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init --check: a hand-authored section with BOTH exec and webhook only passes if EVERY configured channel delivers", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-allchannels-"));
+    try {
+      // `mc init`'s own flags are mutually exclusive per invocation, but
+      // nothing stops a hand-authored config.toml from configuring both -
+      // and a health check auditing it must not report healthy just because
+      // ONE of the two channels happens to work (that's the REAL notify
+      // seam's "any is enough" policy, deliberately NOT this command's).
+      const workingOut = join(initHome, "working-hook-out.json");
+      writeFileSync(
+        join(initHome, "config.toml"),
+        `[notify]\nexec = "cat > ${workingOut}"\nwebhook = "https://example.invalid/nope"\n`,
+      );
+      const env = { ...process.env, MC_HOME: initHome };
+
+      const check = spawnSync(process.execPath, [entry, "init", "--check"], { encoding: "utf8", env });
+      assert.equal(check.status, 1, check.stdout + check.stderr);
+      assert.match(check.stdout, /FAIL.*\[notify\] dry test dispatch delivered \(exec=OK, webhook=FAILED/);
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("notify dispatch: a timed-out exec hook's entire process GROUP is killed, not just the immediate shell (no orphaned backgrounded child)", async () => {
+    const { sendTest } = await import("../src/core/notify.ts");
+    const pidFile = join(home, "orphan-pid.txt");
+    // Backgrounds a long-lived `sleep` (which stays in the SAME process
+    // group as the shell - non-interactive `sh -c` has no job control to
+    // move it to its own) then blocks past dispatch's internal 15s timeout
+    // with a second, foreground sleep - guaranteeing the timeout path fires
+    // while the backgrounded child is still alive to potentially leak.
+    const exec = `sleep 100 & echo $! > ${pidFile}; sleep 100`;
+    const start = Date.now();
+    const channels = await sendTest({ exec, webhook: null });
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed >= 14_000, `expected dispatch's ~15s timeout to have fired, took ${elapsed}ms`);
+    assert.equal((channels.exec as { delivered?: boolean } | undefined)?.delivered, false);
+
+    const orphanPid = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isInteger(orphanPid) && orphanPid > 0, `expected a real pid written to ${pidFile}`);
+    // The SIGKILL to the group races the timeout callback returning; give it
+    // a brief moment to actually land before asserting the backgrounded
+    // process - not just the `sh` that spawned it - is gone.
+    const deadline = Date.now() + 5000;
+    while (pidAlive(orphanPid) && Date.now() < deadline) await sleep(100);
+    assert.equal(pidAlive(orphanPid), false, `orphaned backgrounded process ${orphanPid} survived the dispatch timeout`);
   });
 
   test("mc init --check: read-only, detects a broken hook path and exits nonzero without changing anything", async () => {
@@ -2472,6 +2581,12 @@ describe("mission-control e2e (stub harness)", () => {
       const afterFirst = readFileSync(store, "utf8");
       assert.ok(afterFirst.includes("# mission-control-reap"), afterFirst);
       assert.ok(afterFirst.includes("reap"), afterFirst);
+      // MC_HOME is set to a non-default location for THIS invocation (initHome,
+      // above) - cron runs jobs with its own minimal environment, so the
+      // installed line must embed that override explicitly or the cron job
+      // would silently reap against the default ~/.mission-control instead.
+      assert.match(afterFirst, /MC_HOME='.*'\s+\S+\/mc\.(js|ts)\s+reap/, afterFirst);
+      assert.ok(afterFirst.includes(initHome), afterFirst);
 
       const second = spawnSync(process.execPath, [entry, "init", "--install-reap"], { encoding: "utf8", env });
       assert.equal(second.status, 0, second.stderr);
