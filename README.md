@@ -71,7 +71,8 @@ mc ls                        # every run: exit + review + cost + tokens + durati
 mc ls --exit running         # filter by state (comma-separated: --exit failed,killed,lost)
 mc ls --review pending       # filter by latest disposition (--review accepted,retry,blocked)
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
-mc show <id>                 # full record + recent events + assessment history
+mc show <id> [--json]        # full record + recent events + assessment history
+                             # --json: {run, assessments, events} - complete, machine-readable
 mc resume <id> "add tests"   # continue the session, new linked run, same workdir
 mc resume <id> --fresh --at <sha> "…"   # restart clean from a git checkpoint
 mc kill <id>

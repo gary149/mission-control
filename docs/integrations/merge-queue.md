@@ -27,7 +27,7 @@ reviewer (human or an orchestrating agent that actually looked at the diff) is t
 who decided the work is mergeable - and that decision, and who made it, is on the
 record, forever, in the `assessments` table.
 
-## Primary recipe: gate on assessment (recommended)
+## The recipe: gate on assessment
 
 ### [notify.assessment] hook
 
@@ -98,43 +98,25 @@ not depend on anyone running `mc ls`:
 `mc reap` retries undelivered notifications of BOTH kinds (run and assessment) from
 their own `notified` flags.
 
-## Weaker alternative: gate on exit (process fact only)
+## Migrating from the old exit-gated recipe
 
-Wiring `[notify]` (the terminal-run hook) to `land` on `exit == "succeeded"` still
-works and is simpler to set up - no separate `mc assess` step required - but it is
-**strictly weaker**: it lands the moment the harness exits cleanly, before any human or
-agent has looked at what it actually produced. Use this only where the project's
-`checkCommand` is trusted to be a complete substitute for review (rare), or as a
-stepping stone before wiring up assessments.
+An earlier version of this document offered a second recipe: wiring `[notify]` (the
+terminal-run hook) to `land` directly on `exit == "succeeded"`, no `mc assess` step
+required. That recipe is gone, not merely deprecated - it contradicts this same
+document's own principle above. `exit: "succeeded"` is a process fact the harness can
+produce entirely on its own; landing on it alone means nothing with a real say-so ever
+looked at the work before it merged, which is exactly the gap assessments exist to
+close.
 
-```sh
-#!/usr/bin/env bash
-# mc terminal-transition -> merge-queue land. Payload arrives on stdin.
-set -euo pipefail
-payload="$(cat)"
-
-read -r exit_ workdir <<<"$(printf '%s' "$payload" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-print(d["exit"], d["workdir"])
-')"
-
-# `succeeded` is a PROCESS fact (clean exit), not a quality judgment - mc does
-# not verify work. Gating on it here only selects which runs ENTER the landing
-# path; the merge queue's checkCommand is the sole actual gate, so make that
-# command a real build+test, not a placeholder. killed/lost runs may still
-# hold salvageable work in their workdir - they are excluded from AUTOMATIC
-# landing, not from manual integration. A run still `queued`/`running` never
-# reaches this hook (it only fires on terminal transitions).
-[ "$exit_" = "succeeded" ] || exit 0
-
-cd "$workdir" && merge-queue land
-```
-
-```toml
-[notify]
-exec = "/home/USER/.mission-control/notify-land.sh"
-```
+If you're running the old hook: switch your `[notify].exec` script to a
+`[notify.assessment].exec` script (the payload shape changes from a bare run record to
+`{topic, run, assessment}` - see the hook above), and start actually running `mc
+assess` on runs before they land. There is no automated equivalent of the old
+behavior to fall back to; a human or an orchestrating agent that looked at the diff
+has to be the one calling `mc assess --disposition accepted`. If your project's
+`checkCommand` is genuinely a complete substitute for review, that still isn't the
+same claim as "a reviewer looked at this" - record the assessment anyway, so the
+ledger reflects who actually authorized the merge.
 
 ## Notes
 
@@ -143,8 +125,7 @@ exec = "/home/USER/.mission-control/notify-land.sh"
   real check from `echo ok`, and neither can this hook.
 - **A failed `land` is not silently swallowed**: the hook's `set -euo pipefail` means
   a non-zero exit from `merge-queue land` (rebase conflict, failed check) propagates
-  as the notify hook's own failure, which mc's `notify_result` (for the exit-based
-  variant) or the assessment row's `notified` flag (for the primary recipe) records
+  as the notify hook's own failure, which the assessment row's `notified` flag records
   as undelivered - `mc reap` retries it. Worth pairing with your own alerting on
   repeated notify failures for the same run, since a permanently-conflicting
   worktree will retry forever otherwise.

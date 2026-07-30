@@ -68,6 +68,13 @@ export interface Assessment {
   note: string | null;
   /** What mc itself observed recording this assessment (os user@host) - distinct from `reviewer`, which is merely asserted. */
   observed: string | null;
+  /**
+   * Delivery bookkeeping for [notify.assessment], not part of the judgment
+   * itself. Stored in db.ts's separate `assessment_notifications` table (NOT
+   * a column on `assessments`) so the judgment row this type otherwise
+   * represents stays genuinely immutable after insert - joined in here for
+   * callers' convenience.
+   */
   notified: boolean;
 }
 
