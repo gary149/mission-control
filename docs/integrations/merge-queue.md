@@ -1,9 +1,8 @@
 # Merge-queue landing integration (config, not code)
 
-Wires mc's push seam to a local merge queue (e.g.
-a merge-queue tool) so a
-run's own worktree lands itself - rebase, run the project's real check command, push
-through a FIFO queue - the moment a reviewer records `accepted` on it. No orchestrator
+Wires mc's push seam to a local merge-queue tool so a run's own worktree lands
+itself - rebase, run the project's real check command, push through a FIFO
+queue - the moment a reviewer records `accepted` on it. No orchestrator
 required: this is one shell script and one config line, and it works identically
 whether the assessment comes from a human at a terminal running `mc assess`, or an
 orchestrating agent that inspected the output and is attributing its own judgment. mc's
