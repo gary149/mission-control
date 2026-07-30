@@ -1,5 +1,107 @@
 import { spawn } from "node:child_process";
-import { claimNotify, eventsAfter, insertEvent, updateRun } from "./db.js";
+import { claimAssessmentNotify, claimNotify, eventsAfter, insertEvent, setAssessmentNotified, updateRun } from "./db.js";
+/**
+ * Deliver `payload` to whichever channels `target` configures (exec and/or
+ * webhook). This is the ONE delivery mechanism in mc - stdin-fully-read
+ * semantics, EPIPE handling, timeouts, webhook POST - shared by every caller
+ * that pushes JSON somewhere: `notifyTerminal` (run payloads),
+ * `notifyAssessment` (assessment payloads), and `sendTest` (`mc init`'s
+ * synthetic verification push). None of them duplicate this logic; they only
+ * differ in what payload they build and what they do with the result.
+ *
+ * Returns one entry per CONFIGURED channel only - an unconfigured channel is
+ * simply absent from the result, never a false/error entry standing in for
+ * "not configured".
+ */
+async function dispatch(payload, target) {
+    const channels = {};
+    if (target.exec) {
+        channels.exec = await new Promise((resolveWait) => {
+            // `detached: true` makes this child a process GROUP leader (POSIX),
+            // not just an isolated process - see the timeout handler below for why
+            // that matters.
+            const child = spawn("sh", ["-c", target.exec], { stdio: ["pipe", "ignore", "ignore"], detached: true });
+            // A hook that exits without draining stdin makes the write below raise
+            // EPIPE. An 'error' event on an EventEmitter with no listener is fatal
+            // to the WHOLE process (not just this promise) - and since it happens
+            // before the claim above can be released, the same crash would
+            // reproduce on every future command that touches this run. Mirrors the
+            // child.on("error", ...) guard below, which covers spawn-time failures.
+            //
+            // A stdin error is also a DELIVERY fact, not just a crash to swallow: it
+            // means the hook process did not receive the full payload (it closed
+            // its read end, or otherwise refused the write, before we finished
+            // sending). A hook that reads a few bytes then exits 0 would otherwise
+            // be recorded delivered:true from the exit code alone - the payload
+            // never actually arrived, so `notified` must not flip true and the
+            // retry (via `mc reap`) must fire.
+            let stdinFailed = false;
+            child.stdin.on("error", () => {
+                stdinFailed = true;
+            });
+            // A hung hook must never pin the caller or block the webhook below.
+            let timedOut = false;
+            const timer = setTimeout(() => {
+                timedOut = true;
+                // Kill the whole process GROUP, not just the immediate `sh` - a hook
+                // that itself spawns or backgrounds a child (a pipeline, `cmd &`, a
+                // compound `;` sequence sh doesn't exec-replace itself for) would
+                // otherwise survive this timeout entirely, undetected, and could go
+                // on attempting delivery after mc has already declared the attempt
+                // timed out and moved on. Mirrors cli.ts's killGroupOrPid for the
+                // harness's own process tree; fall back to a bare signal only if the
+                // group signal itself is unavailable (child.pid missing/already gone).
+                try {
+                    process.kill(-child.pid, "SIGKILL");
+                }
+                catch {
+                    child.kill("SIGKILL");
+                }
+            }, 15_000);
+            try {
+                // write()/end() do not throw synchronously for EPIPE in practice (it
+                // surfaces via the 'error' event above), but guard the call itself
+                // too rather than relying on that alone.
+                child.stdin.write(payload);
+                child.stdin.end();
+            }
+            catch {
+                stdinFailed = true; // same fact, just observed synchronously
+            }
+            child.on("close", (code) => {
+                clearTimeout(timer);
+                resolveWait(timedOut
+                    ? { delivered: false, error: "timeout" }
+                    : stdinFailed
+                        ? { delivered: false, error: "stdin write failed; payload not fully sent", exit_code: code }
+                        : { delivered: code === 0, exit_code: code });
+            });
+            child.on("error", (error) => {
+                clearTimeout(timer);
+                resolveWait({ delivered: false, error: String(error) });
+            });
+        });
+    }
+    if (target.webhook) {
+        try {
+            const res = await fetch(target.webhook, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: payload,
+                signal: AbortSignal.timeout(15_000),
+            });
+            channels.webhook = { delivered: res.ok, status: res.status };
+        }
+        catch (error) {
+            // Delivery failure must never take the caller down with it.
+            channels.webhook = { delivered: false, error: String(error) };
+        }
+    }
+    return channels;
+}
+function anyDelivered(channels) {
+    return Object.keys(channels).some((name) => Boolean(channels[name]?.delivered));
+}
 /**
  * One push per terminal transition. Payload carries `exit` and, when the run
  * didn't succeed, why - but no credential-plumbing detail (SPEC: auth
@@ -80,75 +182,9 @@ export async function notifyTerminal(run, config) {
         started_at: run.started_at,
         ended_at: run.ended_at,
     });
-    const channels = {};
-    if (config.notify.exec) {
-        channels.exec = await new Promise((resolveWait) => {
-            const child = spawn("sh", ["-c", config.notify.exec], { stdio: ["pipe", "ignore", "ignore"] });
-            // A hook that exits without draining stdin makes the write below raise
-            // EPIPE. An 'error' event on an EventEmitter with no listener is fatal
-            // to the WHOLE process (not just this promise) - and since it happens
-            // before the claim above can be released, the same crash would
-            // reproduce on every future command that touches this run. Mirrors the
-            // child.on("error", ...) guard below, which covers spawn-time failures.
-            //
-            // A stdin error is also a DELIVERY fact, not just a crash to swallow: it
-            // means the hook process did not receive the full payload (it closed
-            // its read end, or otherwise refused the write, before we finished
-            // sending). A hook that reads a few bytes then exits 0 would otherwise
-            // be recorded delivered:true from the exit code alone - the payload
-            // never actually arrived, so `notified` must not flip true and fix 2's
-            // retry must fire.
-            let stdinFailed = false;
-            child.stdin.on("error", () => {
-                stdinFailed = true;
-            });
-            // A hung hook must never pin the supervisor or block the webhook below.
-            let timedOut = false;
-            const timer = setTimeout(() => {
-                timedOut = true;
-                child.kill("SIGKILL");
-            }, 15_000);
-            try {
-                // write()/end() do not throw synchronously for EPIPE in practice (it
-                // surfaces via the 'error' event above), but guard the call itself
-                // too rather than relying on that alone.
-                child.stdin.write(payload);
-                child.stdin.end();
-            }
-            catch {
-                stdinFailed = true; // same fact, just observed synchronously
-            }
-            child.on("close", (code) => {
-                clearTimeout(timer);
-                resolveWait(timedOut
-                    ? { delivered: false, error: "timeout" }
-                    : stdinFailed
-                        ? { delivered: false, error: "stdin write failed; payload not fully sent", exit_code: code }
-                        : { delivered: code === 0, exit_code: code });
-            });
-            child.on("error", (error) => {
-                clearTimeout(timer);
-                resolveWait({ delivered: false, error: String(error) });
-            });
-        });
-    }
-    if (config.notify.webhook) {
-        try {
-            const res = await fetch(config.notify.webhook, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: payload,
-                signal: AbortSignal.timeout(15_000),
-            });
-            channels.webhook = { delivered: res.ok, status: res.status };
-        }
-        catch (error) {
-            // Delivery failure must never take the supervisor down with it.
-            channels.webhook = { delivered: false, error: String(error) };
-        }
-    }
+    const channels = await dispatch(payload, config.notify);
     const configured = Object.keys(channels);
-    const delivered = configured.some((name) => Boolean(channels[name]?.delivered));
+    const delivered = anyDelivered(channels);
     insertEvent(run.id, "notify_result", {
         configured,
         channels: configured.length > 0 ? channels : undefined,
@@ -165,4 +201,61 @@ export async function notifyTerminal(run, config) {
     // contract needs the next `mc reap` to see notified=false and try again.
     if (configured.length > 0 && !delivered)
         updateRun(run.id, { notified: false });
+}
+/**
+ * Assessment receipts get their OWN delivery seam - config's
+ * `[notify.assessment]`, never the top-level `[notify]` used by
+ * notifyTerminal above. This is deliberate, not an oversight: `[notify]`
+ * payloads assume a terminal RUN shape, and an integration built against
+ * that shape (reading `.exit`, `.cost_usd`, ...) could misfire if an
+ * assessment payload - `{topic, run, assessment}` - arrived on the same
+ * hook. Keeping them separate means an operator who only wants run
+ * completion pushes never has to filter out assessment noise, and vice
+ * versa.
+ *
+ * Delivery truth lives in db.ts's separate `assessment_notifications` table
+ * (keyed run_id + assessment seq), NOT a `notified` column on the assessment
+ * row itself - see that table's comment for why: a mutable delivery flag on
+ * `assessments` would UPDATE a judgment row in place on every claim/release,
+ * which would make that table not genuinely append-only. claimAssessmentNotify
+ * / setAssessmentNotified are the only things that ever touch it, with the
+ * identical stdin-fully-read/exit-0 semantics as notifyTerminal - both go
+ * through the same `dispatch` above. `mc reap` retries any assessment still
+ * undelivered the same way it retries failed run notifications.
+ */
+export async function notifyAssessment(run, assessment, config) {
+    if (!claimAssessmentNotify(run.id, assessment.seq))
+        return;
+    const payload = JSON.stringify({ topic: "assessment_recorded", run, assessment });
+    const channels = await dispatch(payload, config.notify.assessment);
+    const configured = Object.keys(channels);
+    // Same "obligation discharged" reading as notifyTerminal: nothing
+    // configured, or at least one channel delivered, both count as settled and
+    // keep notified=1 from the claim above. A total failure releases the claim.
+    if (configured.length > 0 && !anyDelivered(channels)) {
+        setAssessmentNotified(run.id, assessment.seq, false);
+    }
+}
+/**
+ * `mc init`'s verify-not-assume step and `mc init --check`'s dry diagnosis
+ * both need "did this hook actually work" without any run/assessment to hang
+ * the payload off - a synthetic, clearly-marked payload distinguishes this
+ * from a real push on the receiving end. Reuses the identical dispatch
+ * mechanics as every real notification, so a hook that passes this check has
+ * been exercised the same way it will be exercised for real.
+ *
+ * Returns the RAW per-channel result, not a reduced boolean - deliberately
+ * different from notifyTerminal/notifyAssessment's "any channel delivered =
+ * obligation discharged" reading. That reading is correct for a REAL push
+ * (one working channel is enough for the run to actually get noticed), but
+ * wrong for a health check auditing a hand-authored section with BOTH exec
+ * and webhook configured: if only one of the two actually works, a caller
+ * that collapsed this to "any" would report the section healthy while one
+ * configured channel is silently broken. cli.ts's callers decide the
+ * all-vs-any policy themselves (see channelsAllOk) - this function only
+ * reports what happened.
+ */
+export async function sendTest(target) {
+    const payload = JSON.stringify({ test: true, note: "mc init verification" });
+    return dispatch(payload, target);
 }

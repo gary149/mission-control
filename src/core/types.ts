@@ -49,6 +49,35 @@ export interface Run {
   notified: boolean;
 }
 
+export type Disposition = "accepted" | "retry" | "blocked";
+
+/**
+ * An attributed, append-only judgment recorded against a TERMINAL run - never
+ * written by any internal mc code path, only by `mc assess` on an operator's
+ * or reviewer's say-so. See db.ts's assessments table comment for the full
+ * set of principles this type encodes.
+ */
+export interface Assessment {
+  run_id: string;
+  seq: number;
+  ts: string;
+  reviewer: string;
+  disposition: Disposition;
+  checkpoint_sha: string | null;
+  evidence: { path: string; sha256: string }[];
+  note: string | null;
+  /** What mc itself observed recording this assessment (os user@host) - distinct from `reviewer`, which is merely asserted. */
+  observed: string | null;
+  /**
+   * Delivery bookkeeping for [notify.assessment], not part of the judgment
+   * itself. Stored in db.ts's separate `assessment_notifications` table (NOT
+   * a column on `assessments`) so the judgment row this type otherwise
+   * represents stays genuinely immutable after insert - joined in here for
+   * callers' convenience.
+   */
+  notified: boolean;
+}
+
 export const EVENT_KINDS = [
   "started",
   "text",

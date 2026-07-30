@@ -13,7 +13,9 @@ a claim, not a result: some harnesses (pi, confirmed) exit the process with code
 when the final turn itself reported an error, and mc classifies that `failed` anyway.
 `exit` says nothing about the *quality* of the output, though - whether the deliverable
 is actually right is a judgment you or the operator still have to make by looking, the
-same way you would for any other delegated work.
+same way you would for any other delegated work. "Recording assessments" below is
+where that judgment goes once you've made it - `mc assess`, not a second thing mc
+computes for you.
 
 ## Launching
 
@@ -48,6 +50,52 @@ same way you would for any other delegated work.
   can even help. An auth/quota failure (e.g. `403 Key limit exceeded`) fails every
   future run identically: stop launching, alert the operator, back off. Retrying into
   a wall burns your schedule and fills the ledger with noise.
+
+## Recording assessments
+
+`exit` told you the process didn't crash. It never told you the work is right. If
+you're the one looking at the actual output - reading the diff, running the tests,
+opening the artifact - record what you conclude:
+
+- **Assess AFTER inspecting, not instead of it.** `mc assess <id> --by <you>
+  --disposition accepted|retry|blocked` is only worth anything if you looked first.
+  mc will happily accept a rubber-stamped `accepted` with no evidence at all - it
+  validates the assessment's shape, never your judgment - which means the honesty of
+  the record is entirely on you. Attribution gives provenance, not trust; don't spend
+  that trust carelessly.
+- **Attribute honestly.** `--by` is your name or identity, not a shared bot account.
+  If you are an Orchestrator recording this on the operator's behalf, say so instead
+  of borrowing their name. mc separately records what it observed running the command
+  (`observed`, os user@host) - it doesn't need you to fake the `reviewer` field to
+  look legitimate.
+- **`retry` and `blocked` are more actionable than `accepted`.** A rubber-stamped
+  `accepted` on broken work is a dead end nobody investigates. `retry` (worth another
+  attempt - `mc resume` it) and `blocked` (needs a human, or a dependency, before
+  anything else can happen) tell the next reader, or the next automation, exactly
+  what to do. Reach for them whenever "accepted" would be generous.
+- **Pass `--evidence` and `--at` when you have them.** `--evidence path...` hashes
+  (sha256) whatever file backed up your call - test output, a rendered screenshot, a
+  build log. `--at SHA` pins the checkpoint you actually reviewed, verified against
+  the run's own workdir when it still exists. Neither is required, but an unattributed
+  `accepted` with zero evidence is a weaker record than one that says what was checked.
+- **A correction is a new assessment, never an edit.** Got it wrong the first time?
+  `mc assess` the run again with the corrected disposition. The earlier one stays on
+  the record - `mc show <id>` prints the full history, oldest first - and the LATEST
+  one is what `mc ls`/`mc ls --review` and any consuming automation act on.
+
+Consuming assessments (yours or another reviewer's) works the same way in reverse:
+
+- **Gate advancement on `accepted`, never on `exit`.** `exit: "succeeded"` is a
+  process fact an unattended harness can produce on its own; `accepted` is a
+  specific person or agent's recorded say-so that the result is good. Automation that
+  merges, deploys, or hands off downstream work should key off the assessment's
+  disposition (`[notify.assessment]`, gated on `disposition == "accepted"`), not off
+  the run's exit code. See `docs/integrations/merge-queue.md` for the canonical
+  example: **mc observes clean exits; a reviewer claims acceptance; only acceptance
+  authorizes advancement.**
+- **`mc ls --review pending` is your review queue.** Every terminal run nobody has
+  assessed yet, without guessing from `exit` alone. `mc ls --review retry,blocked`
+  surfaces exactly what still needs work.
 
 ## Continuing work
 

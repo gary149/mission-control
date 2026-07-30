@@ -1,15 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { accessSync, constants as fsConstants, existsSync, readFileSync, realpathSync, renameSync, writeFileSync, } from "node:fs";
 import { createRequire } from "node:module";
+import { hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ADAPTERS, getAdapter } from "./core/adapters/registry.js";
 import { checkGatewayModelServed, resolveAuth } from "./core/auth.js";
-import { loadConfig } from "./core/config.js";
-import { eventsAfter, findRun, listRuns, markLost, getRun, insertEvent } from "./core/db.js";
+import { ensureHome, loadConfig, malformedLines, mcHome, quoteTomlString } from "./core/config.js";
+import { assessmentsFor, eventsAfter, findRun, insertAssessment, latestAssessment, listRuns, markLost, getRun, insertEvent, unnotifiedAssessments, } from "./core/db.js";
 import { launch } from "./core/launch.js";
-import { notifyTerminal } from "./core/notify.js";
+import { notifyAssessment, notifyTerminal, sendTest } from "./core/notify.js";
 import { evaluateWorktree, pruneWorktree } from "./core/prune.js";
 import { PreflightError } from "./core/types.js";
 function fail(message) {
@@ -29,36 +31,53 @@ function requireRun(idOrPrefix) {
 const EXIT_VALUES = Object.keys({
     queued: 1, running: 1, succeeded: 1, failed: 1, killed: 1, lost: 1,
 });
+// Every disposition value, same exhaustiveness trick as EXIT_VALUES above.
+const DISPOSITION_VALUES = Object.keys({
+    accepted: 1, retry: 1, blocked: 1,
+});
+// "pending" is not a Disposition - it is the ABSENCE of any assessment row
+// (see db.ts's assessments table comment) - so it is added here, at the CLI's
+// filter-vocabulary layer, rather than smuggled into the Disposition type
+// itself where it would wrongly imply mc ever stores it.
+const REVIEW_VALUES = ["pending", ...DISPOSITION_VALUES];
 /**
- * Comma-separated, repeatable value filter for `mc ls --exit`. Unknown values
- * fail loudly with the valid set - a typo that silently matched nothing would
- * read as "no runs in that state". A supplied flag whose tokens are all empty
- * (`--exit ','`, or automation interpolating an empty variable) must not
+ * Comma-separated, repeatable value filter shared by `mc ls --exit` and `mc
+ * ls --review` (originally just `--exit`, generalized once `--review` needed
+ * the identical parsing/validation shape). Unknown values fail loudly with
+ * the valid set - a typo that silently matched nothing would read as "no
+ * runs in that state". A supplied flag whose tokens are all empty (e.g.
+ * `--exit ','`, or automation interpolating an empty variable) must not
  * degrade to "no filter" either: that returns the full unfiltered ledger with
  * exit 0, the worst case for an automated consumer expecting filtered output.
  */
-function parseExitFilter(args) {
+function parseValueFilter(args, flag, validValues) {
     const values = [];
     let seen = false;
     for (let i = 0; i < args.length; i++) {
-        if (args[i] !== "--exit")
+        if (args[i] !== flag)
             continue;
         seen = true;
         const next = args[i + 1];
         if (!next || next.startsWith("--"))
-            fail(`--exit requires a value (${EXIT_VALUES.join(", ")})`);
+            fail(`${flag} requires a value (${validValues.join(", ")})`);
         values.push(...next.split(",").map((v) => v.trim()).filter(Boolean));
         i++;
     }
     if (!seen)
         return null;
     if (values.length === 0)
-        fail(`--exit requires a value (${EXIT_VALUES.join(", ")})`);
+        fail(`${flag} requires a value (${validValues.join(", ")})`);
     for (const v of values) {
-        if (!EXIT_VALUES.includes(v))
-            fail(`unknown --exit value "${v}" (valid: ${EXIT_VALUES.join(", ")})`);
+        if (!validValues.includes(v))
+            fail(`unknown ${flag} value "${v}" (valid: ${validValues.join(", ")})`);
     }
     return new Set(values);
+}
+function parseExitFilter(args) {
+    return parseValueFilter(args, "--exit", EXIT_VALUES);
+}
+function parseReviewFilter(args) {
+    return parseValueFilter(args, "--review", REVIEW_VALUES);
 }
 function pidAlive(pid) {
     if (!pid)
@@ -296,6 +315,19 @@ function tokensCell(r) {
         return "-";
     return `${compactTokens(r.tokens_in ?? 0)}/${compactTokens(r.tokens_out ?? 0)}`;
 }
+/**
+ * The REVIEW column / summary-line value for a run: "-" while a run is still
+ * active (review begins only after the process stops - see `mc assess`'s own
+ * refusal), the latest disposition once a reviewer has recorded one, or the
+ * literal string "pending" for a terminal run with none. "pending" is
+ * computed here, at display time, from the ABSENCE of a row - it is never
+ * itself stored (see db.ts's assessments table comment).
+ */
+function reviewStatus(run) {
+    if (isActive(run))
+        return "-";
+    return latestAssessment(run.id)?.disposition ?? "pending";
+}
 function parseRunArgs(args) {
     let harness = null;
     let model = null;
@@ -506,6 +538,378 @@ async function harnessCheck(args) {
     }
     console.log(`\nall checks passed for ${name}`);
 }
+const REAP_CRON_TAG = "# mission-control-reap";
+/**
+ * Replace (or append) a single top-level `[section]` block in TOML text,
+ * leaving every OTHER line byte-for-byte untouched. mc only ever owns
+ * [notify] and [notify.assessment] in config.toml - hand-authored [gateway.*]
+ * blocks, comments, and anything else an operator added must survive `mc
+ * init` verbatim. There is no general TOML *writer* here on purpose - only
+ * enough text surgery to own exactly the sections mc owns, which is also
+ * what makes re-running `mc init` with the same flags byte-for-byte
+ * idempotent.
+ */
+function upsertTomlSection(text, section, lines) {
+    // Split into lines with no artificial trailing-newline artifact ("a\nb\n"
+    // and "a\nb" must normalize to the SAME ["a","b"], or the append path
+    // below and the replace path would disagree about whether a blank-line
+    // separator already exists - that mismatch was the actual idempotency bug
+    // this function used to have (a second `mc init` run with identical flags
+    // produced a different config.toml than the first).
+    const src = text.split("\n");
+    if (src.length > 0 && src[src.length - 1] === "")
+        src.pop();
+    const headerRe = new RegExp(`^\\[${section.replace(/\./g, "\\.")}\\]$`);
+    const anyHeaderRe = /^\[[A-Za-z0-9_.-]+\]$/;
+    let start = -1;
+    let end = -1; // exclusive
+    for (let i = 0; i < src.length; i++) {
+        if (!headerRe.test(src[i].trim()))
+            continue;
+        start = i;
+        end = src.length;
+        for (let j = i + 1; j < src.length; j++) {
+            if (anyHeaderRe.test(src[j].trim())) {
+                end = j;
+                break;
+            }
+        }
+        break;
+    }
+    const block = [`[${section}]`, ...lines];
+    let out;
+    if (start === -1) {
+        // Section doesn't exist yet: append it, with a blank-line separator if
+        // the file already has other content, none if it's empty.
+        out = src.length > 0 ? [...src, "", ...block] : block;
+    }
+    else {
+        // Replace in place, keeping everything BEFORE the section byte-for-byte
+        // (it's never touched). Whatever comes after gets exactly one canonical
+        // blank-line separator re-inserted (normalizing away any leftover blank
+        // line right after the old block first) - reconstructed the same way
+        // every time, which is what makes re-running this idempotent regardless
+        // of whether the section being replaced was the first, middle, or last
+        // one previously written.
+        const before = src.slice(0, start);
+        let after = src.slice(end);
+        if (after.length > 0 && after[0] === "")
+            after = after.slice(1);
+        out = after.length > 0 ? [...before, ...block, "", ...after] : [...before, ...block];
+    }
+    return `${out.join("\n")}\n`;
+}
+/**
+ * Read the current user's crontab, FAILING CLOSED on anything ambiguous.
+ * `crontab -l` exits nonzero both for "this user genuinely has no crontab
+ * yet" (the ordinary, expected case) AND for real failures - permission
+ * denied, the binary missing, a transient read error. Those are NOT the same
+ * thing, and conflating them used to mean any transient failure here read as
+ * "empty crontab" - which installReapCron below would then treat as safe to
+ * REPLACE with just mc's own line, destroying whatever the user's actual
+ * crontab held. Only the specific, positively-identified "no crontab for
+ * this user" message - which both cron implementations observed (vixie-cron/
+ * cronie on Linux, the bundled cron on macOS) print to stderr on that exact
+ * case - counts as genuinely empty. Anything else is reported as a failure
+ * to the caller, never silently swallowed into "".
+ */
+function readCrontab() {
+    const r = spawnSync("crontab", ["-l"], { encoding: "utf8" });
+    if (r.status === 0)
+        return { ok: true, text: r.stdout };
+    if (r.error)
+        return { ok: false, reason: `could not run crontab: ${r.error.message}` };
+    if (/no crontab for/i.test(r.stderr ?? ""))
+        return { ok: true, text: "" };
+    return { ok: false, reason: (r.stderr ?? "").trim() || `crontab -l exited with status ${r.status}` };
+}
+/** Informational only (used by `mc init --check`'s display line) - an unreadable crontab reads as "unknown", never a false "absent". */
+function reapCronStatus() {
+    const read = readCrontab();
+    if (!read.ok)
+        return "unknown";
+    return read.text.split("\n").some((l) => l.includes(REAP_CRON_TAG)) ? "present" : "absent";
+}
+/**
+ * Idempotent: checks for the tag BEFORE writing, so re-running `mc init
+ * --install-reap` never duplicates the line. Removable by hand - the tagged
+ * trailing comment is the documented way to find and delete it (`crontab -e`).
+ * Refuses to write at all if the existing crontab couldn't be reliably read
+ * (see readCrontab) - better to fail the install loudly than risk clobbering
+ * a crontab mc failed to see the real contents of.
+ */
+/** Single-quote a value for embedding in a crontab line's own shell command, escaping any embedded single quotes. */
+function shellQuoteSingle(value) {
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+function installReapCron() {
+    const read = readCrontab();
+    if (!read.ok) {
+        return {
+            status: "failed",
+            detail: `refusing to modify crontab - could not reliably read the existing one: ${read.reason}`,
+        };
+    }
+    if (read.text.split("\n").some((l) => l.includes(REAP_CRON_TAG))) {
+        return { status: "already-present", detail: "already present" };
+    }
+    const mcPath = realpathSync(process.argv[1]);
+    // Cron jobs run with their OWN minimal environment, not this process's -
+    // an MC_HOME override active when `--install-reap` runs (a relocated state
+    // dir, a test rig) would otherwise silently vanish from the cron job,
+    // which would then reap against the DEFAULT ~/.mission-control instead of
+    // wherever this invocation was actually configured against. Embed it
+    // explicitly, shell-quoted, only when it's actually set - the unset case
+    // already resolves to the same default under cron's own HOME.
+    const envPrefix = process.env.MC_HOME ? `MC_HOME=${shellQuoteSingle(process.env.MC_HOME)} ` : "";
+    const line = `*/10 * * * * ${envPrefix}${mcPath} reap ${REAP_CRON_TAG}`;
+    const next = read.text.length > 0 && !read.text.endsWith("\n") ? `${read.text}\n${line}\n` : `${read.text}${line}\n`;
+    const r = spawnSync("crontab", ["-"], { input: next, encoding: "utf8" });
+    if (r.status !== 0)
+        return { status: "failed", detail: `crontab write failed: ${r.stderr?.trim() || "unknown error"}` };
+    return { status: "added", detail: line };
+}
+/**
+ * Whether an exec hook's target looks runnable, WITHOUT running it. Only
+ * meaningful when the exec string's first token is a plain existing file (the
+ * common case: a script path) - a shell one-liner like `cat > out.json` names
+ * no such file, so this returns null (not applicable) rather than a false
+ * positive/negative; there is no general way to statically validate an
+ * arbitrary shell command.
+ */
+function execTargetStatus(exec) {
+    const bin = exec.trim().split(/\s+/)[0];
+    if (!bin || !existsSync(bin))
+        return null;
+    let executable = true;
+    try {
+        accessSync(bin, fsConstants.X_OK);
+    }
+    catch {
+        executable = false;
+    }
+    return { path: bin, executable };
+}
+/**
+ * Whether EVERY configured channel in a sendTest() result delivered - the
+ * health-check policy, deliberately stricter than notifyTerminal/
+ * notifyAssessment's real-delivery "any channel is enough" policy (see
+ * notify.ts's sendTest doc comment for why the two must differ): a
+ * hand-authored section with both exec and webhook configured is only
+ * genuinely healthy if BOTH work, not if one silently covers for the other.
+ */
+function channelsAllOk(channels) {
+    const names = Object.keys(channels);
+    return names.length > 0 && names.every((n) => Boolean(channels[n]?.delivered));
+}
+/** Per-channel human summary for a sendTest() result, e.g. "exec=OK, webhook=FAILED (status 500)". */
+function channelSummary(channels) {
+    return Object.entries(channels)
+        .map(([name, result]) => {
+        const r = result;
+        if (r?.delivered)
+            return `${name}=OK`;
+        const detail = r?.error ?? (r?.status != null ? `status ${r.status}` : r?.exit_code != null ? `exit ${r.exit_code}` : "not delivered");
+        return `${name}=FAILED (${detail})`;
+    })
+        .join(", ");
+}
+/**
+ * Read-only diagnosis: config.toml parseability, hook file existence/
+ * executability, crontab entry presence, and a dry test dispatch through
+ * every configured hook - changes NOTHING. Exits nonzero the moment anything
+ * configured looks broken, so a broken setup is caught before an operator
+ * assumes it works (the whole reason `mc init` verifies rather than assumes -
+ * the fleet audit found five independent operators with a notify hook that
+ * silently never fired).
+ */
+async function initCheck() {
+    const configPath = join(mcHome(), "config.toml");
+    let broken = false;
+    const report = (ok, label) => {
+        console.log(`  ${ok ? "OK" : "FAIL"}  ${label}`);
+        if (!ok)
+            broken = true;
+    };
+    let configText = "";
+    if (existsSync(configPath)) {
+        try {
+            configText = readFileSync(configPath, "utf8");
+            report(true, `${configPath} is readable`);
+        }
+        catch (error) {
+            report(false, `${configPath} unreadable: ${error}`);
+        }
+    }
+    else {
+        console.log(`  (no config.toml at ${configPath}; defaults apply)`);
+    }
+    const config = loadConfig();
+    const targets = [
+        ["[notify]", config.notify, "notify"],
+        ["[notify.assessment]", config.notify.assessment, "notify.assessment"],
+    ];
+    for (const [label, target, sectionName] of targets) {
+        // loadConfig()/parseToml() are lenient BY DESIGN (a malformed line is
+        // skipped, not fatal to the whole file) - but that means a hook that
+        // failed to parse (e.g. an unterminated quoted string) is INDISTINGUISHABLE
+        // from "nothing configured" once it reaches `target.exec`/`target.webhook`
+        // as null. Check the raw text directly for that specific failure before
+        // trusting the parsed (and therefore possibly silently-emptied) result.
+        const badLines = configText ? malformedLines(configText, sectionName) : [];
+        if (badLines.length > 0) {
+            report(false, `${label} has a line that failed to parse (check for an unterminated quoted string): ${badLines[0]}`);
+            continue; // nothing usable was actually extracted; the checks below would just report "nothing configured"
+        }
+        if (target.exec) {
+            const status = execTargetStatus(target.exec);
+            if (status)
+                report(status.executable, `${label} exec target is executable (${status.path})`);
+        }
+        if (target.exec || target.webhook) {
+            const channels = await sendTest(target);
+            report(channelsAllOk(channels), `${label} dry test dispatch delivered (${channelSummary(channels)})`);
+        }
+    }
+    // Crontab presence is informational only - not opting into --install-reap
+    // is a valid, common configuration, not a broken one. "unknown" (a
+    // genuinely unreadable crontab) is reported as such, never collapsed into
+    // a false "absent" - see readCrontab's fail-closed reasoning.
+    console.log(`  (info) crontab reap entry: ${reapCronStatus()}`);
+    if (broken) {
+        console.error("\nmc init --check found problem(s) above; nothing was changed");
+        process.exit(1);
+    }
+    console.log("\nall checks passed; nothing was changed");
+}
+/**
+ * `mc init`: idempotent config.toml writer for the two sections mc owns
+ * ([notify], [notify.assessment]), plus the optional crontab reap entry.
+ * Verifies rather than assumes: any hook this invocation just wrote (or was
+ * just told about again) gets an immediate synthetic test push, and the
+ * result is printed - never silently trusted. This is the direct answer to
+ * the fleet-audit finding that five independent operators configured a
+ * notify hook that never actually fired.
+ */
+async function runInit(args) {
+    if (args.includes("--check"))
+        return initCheck();
+    let notifyExec = null;
+    let notifyWebhook = null;
+    let assessmentExec = null;
+    let assessmentWebhook = null;
+    let installReap = false;
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        const next = () => {
+            const value = args[++i];
+            if (value === undefined)
+                fail(`${arg} requires a value`);
+            return value;
+        };
+        switch (arg) {
+            case "--notify-exec":
+                notifyExec = next();
+                break;
+            case "--notify-webhook":
+                notifyWebhook = next();
+                break;
+            case "--assessment-exec":
+                assessmentExec = next();
+                break;
+            case "--assessment-webhook":
+                assessmentWebhook = next();
+                break;
+            case "--install-reap":
+                installReap = true;
+                break;
+            default: fail(`unknown flag ${arg}`);
+        }
+    }
+    if (notifyExec && notifyWebhook)
+        fail("--notify-exec and --notify-webhook are mutually exclusive");
+    if (assessmentExec && assessmentWebhook)
+        fail("--assessment-exec and --assessment-webhook are mutually exclusive");
+    ensureHome();
+    const configPath = join(mcHome(), "config.toml");
+    const existing = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
+    let text = existing;
+    // quoteTomlString escapes backslashes/quotes so an exec command containing
+    // either (e.g. `cat > "a file.json"`) round-trips through config.toml
+    // instead of producing invalid TOML that silently truncates on read-back
+    // (raw interpolation used to do exactly that).
+    if (notifyExec || notifyWebhook) {
+        text = upsertTomlSection(text, "notify", [
+            notifyExec ? `exec = ${quoteTomlString(notifyExec)}` : null,
+            notifyWebhook ? `webhook = ${quoteTomlString(notifyWebhook)}` : null,
+        ].filter((l) => l !== null));
+    }
+    if (assessmentExec || assessmentWebhook) {
+        text = upsertTomlSection(text, "notify.assessment", [
+            assessmentExec ? `exec = ${quoteTomlString(assessmentExec)}` : null,
+            assessmentWebhook ? `webhook = ${quoteTomlString(assessmentWebhook)}` : null,
+        ].filter((l) => l !== null));
+    }
+    if (text !== existing) {
+        // Atomic write: tmp file then rename, so a crash mid-write never leaves a
+        // truncated config.toml behind for the next command to half-read.
+        const tmp = `${configPath}.tmp-${process.pid}`;
+        writeFileSync(tmp, text);
+        renameSync(tmp, configPath);
+        console.log(`wrote ${configPath}`);
+    }
+    else if (!existsSync(configPath)) {
+        console.log(`no options given; ${configPath} not created (nothing to configure)`);
+    }
+    else {
+        console.log(`${configPath} unchanged`);
+    }
+    // Verify, don't assume - every hook this invocation named gets an
+    // immediate synthetic push, reported honestly either way. Config.toml is
+    // already written above regardless of what happens here (verification
+    // failing does not mean the write itself failed); what changes is the
+    // process's own exit code, tracked in `anyFailed` below.
+    // Every configured channel must actually deliver here, not just "any one
+    // of them" - notifyTerminal/notifyAssessment's real-delivery policy treats
+    // one working channel as enough (a real push only needs to land somewhere),
+    // but a health check auditing a section with BOTH exec and webhook set must
+    // not report OK while one of the two is silently broken. See notify.ts's
+    // sendTest doc comment.
+    let anyFailed = false;
+    if (notifyExec || notifyWebhook) {
+        const channels = await sendTest({ exec: notifyExec, webhook: notifyWebhook });
+        const ok = channelsAllOk(channels);
+        console.log(`[notify] verification: ${ok ? "OK" : "FAILED"} (${channelSummary(channels)})`);
+        if (!ok)
+            anyFailed = true;
+    }
+    if (assessmentExec || assessmentWebhook) {
+        const channels = await sendTest({ exec: assessmentExec, webhook: assessmentWebhook });
+        const ok = channelsAllOk(channels);
+        console.log(`[notify.assessment] verification: ${ok ? "OK" : "FAILED"} (${channelSummary(channels)})`);
+        if (!ok)
+            anyFailed = true;
+    }
+    if (installReap) {
+        const result = installReapCron();
+        console.log(result.status === "added"
+            ? `crontab: added reap entry (${result.detail})`
+            : result.status === "already-present"
+                ? "crontab: already present"
+                : `crontab: FAILED (${result.detail})`);
+        if (result.status === "failed")
+            anyFailed = true;
+    }
+    // A requested verification or install that failed is exactly the silent
+    // false-green `mc init` exists to eliminate - report everything above
+    // first (an operator debugging this needs to see ALL the results, not just
+    // the first failure), THEN fail the process so automation (a setup script,
+    // CI) notices without having to grep stdout for "FAILED".
+    if (anyFailed) {
+        console.error("\nmc init: one or more requested verifications or installs failed (see FAILED lines above)");
+        process.exit(1);
+    }
+}
 function printHelp() {
     const version = createRequire(import.meta.url)("../package.json").version;
     const harnesses = ADAPTERS.map((a) => a.name).join(", ");
@@ -525,7 +929,7 @@ COMMANDS
                 Overrides: --artifact (replaces inherited list),
                 --max-minutes, --max-idle-minutes, --budget
   reap          Cron-safe: mark dead-supervisor runs lost, deliver pending
-                notifications (e.g. */10 * * * * mc reap)
+                run AND assessment notifications (e.g. */10 * * * * mc reap)
   prune         Reclaim disk from terminal runs' worktrees. Default: dry-run
                 report (candidate, status, size). --yes actually removes -
                 only worktrees that are CLEAN and whose HEAD is already
@@ -536,14 +940,59 @@ COMMANDS
   ls            List runs; also reaps lost runs and re-delivers missed notifications.
                 --exit filters by state, comma-separated
                 (e.g. --exit running  |  --exit failed,killed,lost)
-  show <id>     Full run record, recent events
+                --review filters by latest disposition, same syntax
+                (e.g. --review pending  |  --review accepted,retry)
+  show <id>     Full run record, recent events, and the run's full
+                assessment history (oldest first)
+                --json      {run, assessments, events} as clean machine-
+                            readable JSON: FULL event stream (not last-10),
+                            assessments complete with evidence hashes,
+                            checkpoint, and delivery state
   tail <id>     Follow a run's event stream until it terminates
   kill <id>     Request termination (state lands when the process actually dies)
+  assess <id> --by REVIEWER --disposition accepted|retry|blocked
+                Append an attributed review receipt to a TERMINAL run (queued/
+                running runs are refused - review begins after the process
+                stops). mc validates structure only, never the judgment: any
+                disposition is accepted as asserted. Append-only - a
+                correction is a NEW row, never an edit of an old one.
+                [--at SHA]      Checkpoint the reviewer inspected; verified
+                                via git in the run's workdir when it still
+                                exists, else accepted as an unverified full SHA
+                [--evidence PATH]...
+                                Repeatable; mc hashes each file (sha256) at
+                                write time, missing file fails loudly
+                [--note TEXT]   Free-text context
+                Dispatches {topic:"assessment_recorded", run, assessment}
+                through [notify.assessment] only - never through [notify].
   harness ls    Adapters: capabilities, install status, live auth probes
   harness check <name> [--gateway G] [--model M]
                 Live end-to-end validation against the REAL CLI (costs cents):
                 launch, session_id, artifact content, cost/token extraction,
                 native resume
+  init          Write/merge [notify] and [notify.assessment] into config.toml
+                (idempotent; preserves everything else in the file, values
+                TOML-escaped so quotes/backslashes round-trip). Every hook
+                named verifies itself with a synthetic test push - EVERY
+                configured channel (exec and/or webhook) must deliver, not
+                just one of them - and exits nonzero if any didn't; init
+                never assumes a hook works.
+                --notify-exec PATH | --notify-webhook URL
+                                Terminal-run push ([notify])
+                --assessment-exec PATH | --assessment-webhook URL
+                                Assessment-recorded push ([notify.assessment])
+                --install-reap  Adds "*/10 * * * * <mc path> reap" to this
+                                user's crontab, tagged "# mission-control-reap"
+                                (idempotent; remove by hand with crontab -e;
+                                embeds MC_HOME= explicitly when this
+                                invocation's environment overrides it, since
+                                cron jobs don't inherit your shell's env)
+  init --check  Read-only: config.toml readability AND parseability (a
+                section that failed to parse - e.g. an unterminated quoted
+                string - is reported broken, not silently "unconfigured"),
+                hook executability, crontab entry presence, a dry test
+                dispatch requiring EVERY configured channel to deliver.
+                Changes nothing; exits nonzero if anything looks broken.
   help          This page (also: -h, --help anywhere)
 
 RUN OPTIONS
@@ -575,11 +1024,23 @@ STATUS
   but exit is a process-completion signal only, not a claim about output
   quality; that judgment is the operator's or orchestrator's to make.
 
+ASSESSMENTS
+  review    pending | accepted | retry | blocked   (- for a non-terminal run)
+  An attributed, append-only judgment a reviewer records with "mc assess",
+  never one mc computes itself. pending_review is the ABSENCE of any
+  assessment on a terminal run, not a stored value. mc checks only that an
+  "mc assess" call is well-formed (terminal run, valid disposition, --by
+  present, evidence files exist) - it never checks whether the judgment
+  itself is correct: attribution gives provenance, not trust.
+
 FILES & ENV
   ~/.mission-control/       state root (override: MC_HOME)
-    mc.db                   runs + events (SQLite; any tool can read it)
+    mc.db                   runs + events + assessments (SQLite; any tool can read it)
     runs/<id>/              spec.json, work/, stdout.jsonl, stderr.log
-    config.toml             [notify] exec/webhook hooks; [gateway.NAME] blocks
+    config.toml             [notify] exec/webhook hooks (terminal runs);
+                            [notify.assessment] exec/webhook (assessment
+                            receipts - a separate seam, never the same hook);
+                            [gateway.NAME] blocks
   MC_CLAUDE_BIN             override the claude binary path (pinning/testing)
   MC_DETECT_TIMEOUT_MS      wall-clock budget for each harness's --version
                             probe (default 10000; raise it if detect()/
@@ -591,6 +1052,10 @@ EXAMPLES
   mc run --harness claude-code --gateway openrouter --model moonshotai/kimi-k3 \\
         --max-minutes 30 --artifact hello.txt "build hello.txt"
   mc ls --json | jq '.[0].exit'
+  mc ls --review pending
+  mc assess 0h4x --by alice --disposition accepted --evidence out/report.md
+  mc init --notify-exec ~/bin/notify.sh --assessment-webhook https://example.com/hook --install-reap
+  mc init --check
   mc harness ls
 
 FOR AGENTS
@@ -616,30 +1081,37 @@ export async function cliMain(argv) {
                 break;
             }
             case "ls": {
-                // ls takes exactly --json and --exit; anything else fails loudly.
-                // Skipping unknown tokens would turn a misspelled `--exiit running`
-                // into an unfiltered SUCCESSFUL response - the worst case for an
-                // automated consumer expecting filtered output.
+                // ls takes exactly --json, --exit, and --review; anything else fails
+                // loudly. Skipping unknown tokens would turn a misspelled `--exiit
+                // running` into an unfiltered SUCCESSFUL response - the worst case
+                // for an automated consumer expecting filtered output.
                 for (let i = 0; i < args.length; i++) {
                     const arg = args[i];
                     if (arg === "--json")
                         continue;
-                    if (arg === "--exit") {
-                        i++; // the flag's value; parseExitFilter validates it
+                    if (arg === "--exit" || arg === "--review") {
+                        i++; // the flag's value; parseExitFilter/parseReviewFilter validates it
                         continue;
                     }
-                    fail(`unknown ls argument "${arg}" (valid: --exit, --json)`);
+                    fail(`unknown ls argument "${arg}" (valid: --exit, --review, --json)`);
                 }
                 const exitFilter = parseExitFilter(args);
+                const reviewFilter = parseReviewFilter(args);
                 // Read command: detect lost runs, but never dispatch/retry delivery
                 // (that's `mc reap`'s job) - see reapLostRuns's doc comment. The
-                // filter applies AFTER the reap pass so it selects on each run's
+                // filters apply AFTER the reap pass so they select on each run's
                 // current truth: a stale `running` row that just got reaped shows up
                 // under `--exit lost`, not under the state it no longer occupies.
                 let runs = await reapLostRuns(listRuns(), false);
                 if (exitFilter)
                     runs = runs.filter((r) => exitFilter.has(r.exit));
+                if (reviewFilter)
+                    runs = runs.filter((r) => reviewFilter.has(reviewStatus(r)));
                 if (args.includes("--json")) {
+                    // --json stays the raw Run[] shape (no bolted-on `review` field):
+                    // assessments are their own append-only history, not a Run column -
+                    // `mc show <id>` is where the full assessment history surfaces, the
+                    // same split as the human table's REVIEW column below vs `mc show`.
                     console.log(JSON.stringify(runs, null, 2));
                     break;
                 }
@@ -647,13 +1119,14 @@ export async function cliMain(argv) {
                     console.log("no runs");
                     break;
                 }
-                const header = ["ID", "TITLE", "HARNESS", "MODEL", "EXIT", "COST", "TOKENS", "DURATION", "AGE"];
+                const header = ["ID", "TITLE", "HARNESS", "MODEL", "EXIT", "REVIEW", "COST", "TOKENS", "DURATION", "AGE"];
                 const rows = runs.map((r) => [
                     r.id,
                     r.title.slice(0, 40),
                     r.harness,
                     (r.model ?? "").slice(0, 24),
                     r.exit,
+                    reviewStatus(r),
                     r.cost_usd != null ? `$${r.cost_usd.toFixed(2)}` : r.cost_basis === "flat_subscription" ? "plan" : "-",
                     tokensCell(r),
                     duration(r.started_at, r.ended_at),
@@ -666,8 +1139,31 @@ export async function cliMain(argv) {
                 break;
             }
             case "show": {
+                // show takes an id and an optional --json, in either order; any other
+                // "--"-prefixed token fails loudly rather than being silently ignored.
+                const jsonMode = args.includes("--json");
+                for (const arg of args) {
+                    if (arg !== "--json" && arg.startsWith("--"))
+                        fail(`unknown show argument "${arg}" (valid: --json)`);
+                }
+                const idArg = args.find((a) => a !== "--json");
                 // Read command: detect lost runs only, never dispatch/retry delivery.
-                const run = (await reapLostRuns([requireRun(args[0])], false))[0];
+                const run = (await reapLostRuns([requireRun(idArg)], false))[0];
+                // Oldest first, full history - never just the latest, per the
+                // assessments table's append-only principle (a correction is a new
+                // row, and the earlier ones remain part of the record). Computed once
+                // and shared by both output modes below.
+                const assessments = assessmentsFor(run.id);
+                if (jsonMode) {
+                    // The machine-readable form: run + the assessments' COMPLETE shape
+                    // (evidence path+sha256, checkpoint_sha, notified delivery state -
+                    // everything the human form's prose lines below only partially
+                    // surface) + the FULL event stream, not the human form's
+                    // abbreviated last-10 - so a script never has to fall back to
+                    // scraping prose for anything this command knows.
+                    console.log(JSON.stringify({ run, assessments, events: eventsAfter(run.id, 0) }, null, 2));
+                    break;
+                }
                 console.log(JSON.stringify(run, null, 2));
                 // Highlighted summary: the JSON above already carries cost_usd/tokens_in/
                 // tokens_out/started_at/ended_at, but as ~4 fields among ~20 - and on a
@@ -675,12 +1171,20 @@ export async function cliMain(argv) {
                 // below. One line keeps "what did this cost" glanceable without a second
                 // source of truth (still computed from the same run row, nothing new).
                 const cost = run.cost_usd != null ? `$${run.cost_usd.toFixed(2)}` : run.cost_basis === "flat_subscription" ? "plan" : "unavailable";
-                console.log(`\ncost=${cost}  tokens=${tokensCell(run)}  duration=${duration(run.started_at, run.ended_at)}`);
+                console.log(`\ncost=${cost}  tokens=${tokensCell(run)}  duration=${duration(run.started_at, run.ended_at)}  review=${reviewStatus(run)}`);
                 const recent = eventsAfter(run.id, 0).slice(-10);
                 if (recent.length > 0) {
                     console.log("\nlast events:");
                     for (const event of recent)
                         console.log(`  [${event.seq}] ${event.kind} ${JSON.stringify(event.payload).slice(0, 120)}`);
+                }
+                if (assessments.length > 0) {
+                    console.log("\nassessments:");
+                    for (const a of assessments) {
+                        const at = a.checkpoint_sha ? ` @${a.checkpoint_sha.slice(0, 7)}` : "";
+                        const note = a.note ? ` (${a.note})` : "";
+                        console.log(`  [${a.seq}] ${a.ts} ${a.reviewer} -> ${a.disposition}${at} observed=${a.observed ?? "-"}${note}`);
+                    }
                 }
                 break;
             }
@@ -825,6 +1329,119 @@ export async function cliMain(argv) {
                 console.log(`    mc tail ${run.id}   # follow`);
                 break;
             }
+            case "assess": {
+                const id = args[0];
+                if (!id) {
+                    fail("usage: mc assess <id> --by REVIEWER --disposition accepted|retry|blocked [--at SHA] [--evidence PATH]... [--note TEXT]");
+                }
+                let reviewer = null;
+                let disposition = null;
+                let at = null;
+                let note = null;
+                const evidencePaths = [];
+                for (let i = 1; i < args.length; i++) {
+                    const arg = args[i];
+                    const next = () => {
+                        const value = args[++i];
+                        if (value === undefined)
+                            fail(`${arg} requires a value`);
+                        return value;
+                    };
+                    switch (arg) {
+                        case "--by":
+                            reviewer = next();
+                            break;
+                        case "--disposition":
+                            disposition = next();
+                            break;
+                        case "--at":
+                            at = next();
+                            break;
+                        case "--evidence":
+                            evidencePaths.push(next());
+                            break;
+                        case "--note":
+                            note = next();
+                            break;
+                        default: fail(`unknown flag ${arg}`);
+                    }
+                }
+                // reviewer is an ASSERTED identity (see db.ts's assessments table
+                // comment) - mandatory, and never defaulted to the OS user or
+                // anything else. Defaulting it would quietly convert "who is
+                // claiming this" into "whoever happened to run the command". Trim
+                // before checking: a whitespace-only value ("--by '   '") is not an
+                // identity either - the pre-trim falsiness check alone let it through
+                // (a non-empty string is truthy regardless of what's in it), and the
+                // trimmed value is also what gets stored, so " alice " and "alice"
+                // aren't silently treated as different reviewers. db.ts's CHECK
+                // constraint (length(trim(reviewer)) > 0) enforces the same rule at
+                // the schema level as defense in depth.
+                reviewer = reviewer?.trim() ?? null;
+                if (!reviewer)
+                    fail("--by is required (reviewer identity is never defaulted)");
+                if (!disposition || !DISPOSITION_VALUES.includes(disposition)) {
+                    fail(`--disposition is required, one of: ${DISPOSITION_VALUES.join(", ")}`);
+                }
+                const run = requireRun(id);
+                // Review begins after the process stops: mc validates structure, not
+                // the judgment, but a still-queued/running run has no terminal state
+                // yet for a reviewer to be attributing a judgment to.
+                if (isActive(run)) {
+                    fail(`run ${run.id} is not terminal yet (exit=${run.exit}); review begins after the process stops`);
+                }
+                // --evidence: repeatable file paths: mc computes and stores sha256 of
+                // each existing file, never the content itself. A missing file fails
+                // loudly rather than silently recording a broken reference.
+                const evidence = evidencePaths.map((p) => {
+                    if (!existsSync(p))
+                        fail(`--evidence file not found: ${p}`);
+                    const sha256 = createHash("sha256").update(readFileSync(p)).digest("hex");
+                    return { path: p, sha256 };
+                });
+                let checkpointSha = null;
+                let unverifiedNote = null;
+                if (at) {
+                    const workdirIsGit = existsSync(run.workdir) &&
+                        spawnSync("git", ["-C", run.workdir, "rev-parse", "--git-dir"], { stdio: "ignore" }).status === 0;
+                    if (workdirIsGit) {
+                        const verify = spawnSync("git", ["-C", run.workdir, "rev-parse", "--verify", `${at}^{commit}`], {
+                            encoding: "utf8",
+                        });
+                        if (verify.status !== 0)
+                            fail(`--at ${at} does not resolve to a commit in ${run.workdir}`);
+                        checkpointSha = verify.stdout.trim();
+                    }
+                    else {
+                        // The run's worktree is gone (pruned, or never existed) - there is
+                        // no git to verify against. Accept a full 40-char hex SHA as-is
+                        // rather than refuse outright, but the record must say the SHA
+                        // was never actually checked.
+                        if (!/^[0-9a-f]{40}$/i.test(at)) {
+                            fail(`--at must be a full 40-char hex SHA when the run's workdir is gone (got "${at}")`);
+                        }
+                        checkpointSha = at.toLowerCase();
+                        unverifiedNote = "checkpoint SHA unverified: run workdir is gone";
+                    }
+                }
+                const finalNote = note && unverifiedNote ? `${note} [${unverifiedNote}]` : (note ?? unverifiedNote);
+                // What mc itself observed while recording this - independent of, and
+                // never substituted for, the asserted `reviewer` identity above.
+                const observed = `${userInfo().username}@${hostname()}`;
+                const assessment = insertAssessment(run.id, {
+                    reviewer,
+                    disposition,
+                    checkpoint_sha: checkpointSha,
+                    evidence,
+                    note: finalNote,
+                    observed,
+                });
+                console.log(JSON.stringify(assessment, null, 2));
+                // Separate seam from [notify] - see notify.ts's notifyAssessment for
+                // why an assessment payload must never reach the terminal-run hook.
+                await notifyAssessment(run, assessment, loadConfig());
+                break;
+            }
             case "reap": {
                 // Cron-safe lost-run detection + at-least-once notification delivery:
                 // the push half of the system must not depend on anyone running `mc
@@ -841,7 +1458,20 @@ export async function cliMain(argv) {
                 // delivered, or none were configured. Not a claim of guaranteed
                 // external receipt (a failed hook leaves notified=false for retry).
                 const settled = after.filter((r) => r.notified && (unnotified.has(r.id) || (activeIds.has(r.id) && r.exit === "lost"))).length;
-                console.log(`reaped ${lost} lost run(s), settled ${settled} notification(s)`);
+                // Assessment notifications are a separate delivery seam and their own
+                // table ([notify.assessment] / assessments.notified) - retried here
+                // the same way undelivered run notifications are retried above.
+                const pendingAssessments = unnotifiedAssessments();
+                if (pendingAssessments.length > 0) {
+                    const config = loadConfig();
+                    for (const a of pendingAssessments) {
+                        const assessedRun = getRun(a.run_id);
+                        if (assessedRun)
+                            await notifyAssessment(assessedRun, a, config);
+                    }
+                }
+                const assessmentsSettled = pendingAssessments.length - unnotifiedAssessments().length;
+                console.log(`reaped ${lost} lost run(s), settled ${settled} notification(s), settled ${assessmentsSettled} assessment notification(s)`);
                 break;
             }
             case "prune": {
@@ -920,6 +1550,12 @@ export async function cliMain(argv) {
                 }
                 break;
             }
+            case "init":
+                // `mc init --check` is read-only diagnosis; every other form writes
+                // config.toml (idempotently) and optionally the crontab reap entry.
+                // Flag/value parsing and validation live in runInit itself.
+                await runInit(args);
+                break;
             case "help":
             case undefined:
                 printHelp();
