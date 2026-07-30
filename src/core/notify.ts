@@ -4,8 +4,9 @@ import { claimNotify, eventsAfter, insertEvent, updateRun } from "./db.ts";
 import type { Run } from "./types.ts";
 
 /**
- * One push per terminal transition. Payload carries both status axes but no
- * credential-plumbing detail (SPEC: auth security invariants) - auth_mode only.
+ * One push per terminal transition. Payload carries `exit` and, when the run
+ * didn't succeed, why - but no credential-plumbing detail (SPEC: auth
+ * security invariants) - auth_mode only.
  *
  * `notified` means "the delivery obligation was discharged": at least one
  * configured channel reported delivered:true, OR zero channels are
@@ -71,7 +72,6 @@ export async function notifyTerminal(run: Run, config: McConfig): Promise<void> 
     host: run.host,
     exit: run.exit,
     exit_code: exitCode,
-    verdict: run.verdict,
     error: errorExcerpt,
     cost_usd: run.cost_usd,
     cost_basis: run.cost_basis,

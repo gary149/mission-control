@@ -1,12 +1,5 @@
 export type ExitStatus = "queued" | "running" | "succeeded" | "failed" | "killed" | "lost";
 
-export type Verdict =
-  | "pending"
-  | "verified"
-  | "failed_verification"
-  | "unverifiable"
-  | "needs_human_look";
-
 export type AuthMode = "subscription" | "api_key" | "gateway";
 
 export type CostBasis = "flat_subscription" | "metered_reported" | "unavailable";
@@ -16,8 +9,8 @@ export interface RunSpec {
   model: string | null;
   prompt: string;
   cwd: string | null;
+  /** Declared deliverables, workdir-relative; injected into the prompt so the harness knows where to write. */
   artifacts: string[];
-  visual: boolean;
   budget_usd: number | null;
   max_minutes: number | null;
   /** Stall cap: kill when the harness emits nothing for this long. null = default (30); 0 = disabled. */
@@ -38,7 +31,6 @@ export interface Run {
   workdir: string;
   session_id: string | null;
   exit: ExitStatus;
-  verdict: Verdict;
   started_at: string;
   ended_at: string | null;
   cost_usd: number | null;
@@ -54,7 +46,6 @@ export interface Run {
   supervisor_pid: number | null;
   stderr_path: string;
   artifacts: string[];
-  verify_evidence: string | null;
   notified: boolean;
 }
 
@@ -68,7 +59,6 @@ export const EVENT_KINDS = [
   "cost_update",
   "artifact",
   "status_change",
-  "verify_result",
   "notify_result",
   "error",
   "exited",

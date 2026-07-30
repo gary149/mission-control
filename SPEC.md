@@ -55,17 +55,17 @@ Hetzner box, plus deep reads of openclaw, omnigent, nanoclaw, pi-mono, agentsvie
 | 2 | Process model | Per-run detached supervisors; per-host SQLite ledger; no global daemon |
 | 3 | Stack | TypeScript on Node >= 22.13; `node:sqlite`, zero runtime deps; committed tsc-emitted `dist/` shipped as an npm package with no install-time scripts (revised 2026-07-23, ADR 0002; was: Bun + compiled single binary) |
 | 4 | Adapters | Wrap each CLI's native headless JSON mode; normalize to one closed event union |
-| 5 | Verification | Two-axis status: `exit` x `verdict`; DONE = succeeded AND verified |
+| 5 | Status | Single-axis `exit`, derived from the process's real termination (exit code, signal, kill request) - never from the agent's own claim of success |
 | 6 | Remote | Install per host; engine is SSH-free; driven via plain `ssh box mc ...` with specs over stdin (revised 2026-07-20, was: `--host` SSH sugar in mc) |
 | 7 | Notifications | Generic per-host `on_terminal` hook (exec and/or webhook); Telegram example config |
-| 8 | Follow-ups | `mc resume` = new run linked by `parent_run_id`, harness-native resume, capability-gated; inherits the parent's artifacts/visual/caps unless overridden (a continuation that silently drops its declared checks stops being verifiable). `mc resume --fresh [--at SHA]` = checkpoint restart: NEW worktree at a commit of the parent's repo, NEW session (for escaping stuck/degraded sessions); needs no resume capability. Same lineage either way |
+| 8 | Follow-ups | `mc resume` = new run linked by `parent_run_id`, harness-native resume, capability-gated; inherits the parent's artifacts/caps unless overridden (a continuation that silently drops the parent's declared artifacts loses the hint of where the harness should write them). `mc resume --fresh [--at SHA]` = checkpoint restart: NEW worktree at a commit of the parent's repo, NEW session (for escaping stuck/degraded sessions); needs no resume capability. Same lineage either way |
 | 9 | agentsview | Loose coupling: converge on conventions, store `session_id`, zero dependency |
 | 10 | V1 adapters | claude-code, codex, pi (one per integration style: stream-json, exec-json, RPC) |
 | 11 | Cost | Always record (unknown, never 0, when unparseable); opt-in per-run `--budget` kill; no global policy |
 | 12 | Capabilities | Static typed declarations in each adapter (agentsview pattern); `mc harness ls`; refuse-loudly |
 | 13 | Auth modes | Three per run: `subscription` (default, zero-config, CLI's own resident login), `api_key`, `gateway` (OpenRouter builtin). Child env built additively from empty, never inherited |
 | 14 | Cost honesty | `cost_basis` field says whether a dollar figure is real, impossible, or absent; `--budget` refused where it can't fire; `--max-minutes` is the universal backstop; no shadow pricing |
-| 15 | The edge | Launch-only: a Run exists iff mc launched it (ADR 0001). Run = one harness session (internal subagents roll up, never rows). Harness = agentic CLI with a workspace; bare API calls excluded. Hosts stand alone; no fleet concept. Verified = declared checks passed, nothing about quality. See CONTEXT.md for the glossary |
+| 15 | The edge | Launch-only: a Run exists iff mc launched it (ADR 0001). Run = one harness session (internal subagents roll up, never rows). Harness = agentic CLI with a workspace; bare API calls excluded. Hosts stand alone; no fleet concept. Exit = what the process did, nothing about quality. See CONTEXT.md for the glossary |
 
 ## Core model
 
@@ -88,7 +88,6 @@ interface Run {
   session_id: string | null;      // harness-native session id (agentsview jump point)
 
   exit: "queued" | "running" | "succeeded" | "failed" | "killed" | "lost";
-  verdict: "pending" | "verified" | "failed_verification" | "unverifiable" | "needs_human_look";
 
   started_at: string; ended_at: string | null;
   cost_usd: number | null;        // null = unknown; never coerce to 0
@@ -100,14 +99,17 @@ interface Run {
   gateway: string | null;         // gateway name when auth_mode === "gateway"
   pid: number | null;
   stderr_path: string;            // ALWAYS a real file
-  artifacts: string[];            // declared expectations at launch; checked by verifier
-  verify_evidence: string | null; // what the verifier actually observed
+  artifacts: string[];            // declared deliverables; injected into the prompt as a hint
 }
 ```
 
-`exit` is what the process did. `verdict` is what we independently confirmed. The UI/CLI
-renders DONE only for `succeeded + verified`; every other combination shows both axes.
-The two are never conflated, because "the agent said done" has been wrong too often.
+`exit` is what the process did, derived from its real termination (exit code, signal, a
+kill request) - never from the agent's own claim of success. Some harnesses (pi,
+confirmed) exit the process with code 0 even when the final turn itself reported an
+error; `exit` still lands `failed` there. It says nothing about the quality of the
+output - "the agent said done" has been wrong too often to trust, but so would an
+automated pass/fail on the output; that judgment is left to the operator or the
+orchestrating agent looking at the actual result.
 
 ### Events
 
@@ -116,7 +118,7 @@ fed by the adapter translating native output. Closed kind union:
 
 ```
 started | text | tool_call | tool_result | subagent | turn_end | cost_update | artifact |
-status_change | verify_result | notify_result | error | exited
+status_change | notify_result | error | exited
 ```
 
 Adapters must map into this union or emit `error`; unknown native events are stored raw
@@ -176,8 +178,10 @@ Rules:
 
 - **Refuse loudly.** If a requested op isn't in the capability declaration, `mc` errors at
   launch naming the capability. Silent degradation is banned (the 97-follow-ups bug).
-- **Fail to `unverifiable`, not to green.** When a native format drifts and parsing breaks,
-  the run keeps running, events degrade to raw, and the verdict axis reflects the blindness.
+- **Never drop, never fabricate.** When a native format drifts and parsing breaks, the
+  run keeps running and the unrecognized line is preserved verbatim as a raw `error`
+  event (never silently discarded) - but `exit` is unaffected either way, since it comes
+  from the process's real termination, not from how much of its output mc understood.
 - **Pin the binary.** The launch spec records the resolved absolute path + version of the
   harness CLI; the supervisor re-checks it before exec (auto-updater relocation broke the
   old runner twice).
@@ -264,8 +268,8 @@ runbook knowledge currently scattered across skill files, made executable:
 
 Two mechanisms keep this honest:
 
-1. **Spec-to-native translation is total or refused.** `--effort`, `--visual`, declared
-   artifacts, and the prompt text are translated into each harness's native equivalents
+1. **Spec-to-native translation is total or refused.** `--effort`, declared artifacts,
+   and the prompt text are translated into each harness's native equivalents
    (effort → env/config/suffix; artifacts → an appended one-line contract in the prompt:
    "write outputs to <paths>"). If a spec field has no native equivalent and no safe
    default, mc refuses by name — never silently drops (decision #12's rule, applied to
@@ -278,18 +282,20 @@ Two mechanisms keep this honest:
    caller inherits it.
 
 Out of scope for v1 but noted: `mc harness bench` — running one canonical task across
-harnesses/models/settings and comparing verification pass rate, cost, and wall time
+harnesses/models/settings and comparing success rate, cost, and wall time
 (omnigent's harness_bench pattern). Deferred until the tracking spine has real usage data.
 
 ### Adapter conformance (how we trust adapters)
 
 "Perfectly implemented" is not achievable against drifting vendor CLIs (documented:
 codex's `--json` changed shape; OpenRouter's shim emitted empty results). What is
-achievable is (a) a guaranteed failure direction and (b) three verification layers:
+achievable is (a) a guaranteed failure direction and (b) three trust layers:
 
-0. **Failure direction.** A broken adapter must degrade to raw-preserved events and an
-   `unverifiable` verdict, never to a false DONE. This invariant is the one every layer
-   below actually tests.
+0. **Failure direction.** A broken adapter must never drop or fabricate: an unrecognized
+   native line is preserved verbatim as a raw `error` event, and cost/tokens stay `null`
+   rather than being invented. Note what this invariant does NOT claim: parsing drift no
+   longer downgrades `exit`, which comes only from the process's real termination. This
+   invariant is the one every layer below actually tests.
 1. **Compile-time contract.** Every factory satisfies the TS interfaces; the event union
    and capability enums are closed types (agentsview's backendcontract, for free in TS).
 2. **Shared conformance suite over recorded fixtures.** Each adapter ships captured real
@@ -297,10 +303,9 @@ achievable is (a) a guaranteed failure direction and (b) three verification laye
    run, a resumed run, a cost-bearing result, and a truncated/malformed stream. ONE
    parameterized test battery replays every fixture through every adapter and asserts the
    invariants: exactly one `started` and one terminal event; no dropped lines (unknown
-   input lands as raw `error` events); cost extracted or null, never 0; the malformed
-   fixture ends `unverifiable`, not `succeeded`; the env-poisoning fixture (credential
-   vars planted in the parent env must never reach a subscription-mode child) passes for
-   every adapter. Capability honesty is meta-tested,
+   input lands as raw `error` events); cost extracted or null, never 0; the env-poisoning
+   fixture (credential vars planted in the parent env must never reach a
+   subscription-mode child) passes for every adapter. Capability honesty is meta-tested,
    omnigent-style: `resume: "native"` requires `resumeArgs` plus a resumed fixture that
    continues the same session; `cost_reporting: "per_run"` requires the success fixture
    to yield non-null cost. A CLI version bump means re-recording fixtures for that
@@ -308,7 +313,7 @@ achievable is (a) a guaranteed failure direction and (b) three verification laye
 3. **Live check: `mc harness check <name>`.** Omnigent's parity principle, adapted: never
    mock the boundary we own. Runs the real installed CLI end-to-end on a trivial
    deterministic task ("create file X containing Y") and asserts the full path: launch,
-   events, exit, verify, cost extraction, and resume when declared. Costs cents; run
+   events, exit, artifact content, cost extraction, and resume when declared. Costs cents; run
    on demand when writing an adapter or after a CLI update. This is a command, not
    standing infrastructure; scheduled re-verification stays out of scope.
 
@@ -320,7 +325,7 @@ captured to files in the run dir). The supervisor:
 1. writes the Run row (`queued` then `running`),
 2. tails adapter events into the events table,
 3. enforces `--budget` (kill + notify on crossing),
-4. on child exit: records `exit`, runs the verifier, records `verdict`,
+4. on child exit: classifies and records `exit`,
 5. fires the `on_terminal` hook exactly once,
 6. exits. Its lifetime equals its run's. Nothing global to babysit.
 
@@ -328,26 +333,22 @@ If the supervisor itself dies, the next `mc ls` detects the orphan (pid gone, no
 row) and marks the run `lost`, which also fires the hook. `lost` is a first-class outcome,
 not a silent absence.
 
-### Verification
+### Verification (removed)
 
-Runs before any terminal verdict. v1 verifiers, in order, all cheap and local:
-
-1. **exit code** of the harness process,
-2. **git effect** (repo tasks): commits made since launch (HEAD recorded at launch in
-   the spec, compared via `rev-list --count`) OR a dirty worktree. An agent that
-   commits everything and leaves a clean tree has produced an effect - fleet evidence
-   showed the old dirty-tree-only check failing exactly the runs that finished
-   cleanest,
-3. **artifacts**: every path declared in the spec exists and is non-trivial (>0 bytes,
-   basic type sniff),
-4. **parser health**: tracks BLINDNESS only - lines mc could not read (`unparsed`) or
-   did not recognize (`unknown-native-event`). Harness-REPORTED errors are cleanly
-   parsed data and never cap the verdict; blindness caps it at `unverifiable`.
-
-Task specs declare expected artifacts up front; a run with no declared artifacts and no
-git effect can at best reach `unverifiable`. Anything flagged visual in the spec
-(`--visual`) short-circuits to `needs_human_look`. Vision-based verification (render +
-inspect) is explicitly v2.
+v1 through this point in the project's history ran a mechanical verifier before every
+terminal status: exit code, git effect (commits/dirty tree since launch), declared
+artifacts (existence + non-triviality), and parser health (blindness from unparsed or
+unrecognized native lines) rolled up into a second `verdict` axis alongside `exit`
+(`verified`/`failed_verification`/`unverifiable`/`needs_human_look`), with `--visual`
+short-circuiting to `needs_human_look`. Removed: the mechanical checks proved less than
+they claimed in practice (an artifact existing and being non-empty is not evidence it is
+*correct*), and the operator judged `exit` - an honest, unembellished process-termination
+fact - to be the right single primitive, leaving output-quality judgment where it
+belongs: with the operator or the orchestrating agent actually looking at the result.
+`--artifact` survives as a declared-deliverable hint injected into the prompt (harnesses
+still need to know where to write), it just isn't checked afterward. Vision-based
+verification (render + inspect), previously slated as a v2 extension of this system, is
+moot along with it.
 
 ### Workspace isolation
 
@@ -524,10 +525,10 @@ The CLI is a surface, not the product. Structure enforces this:
 
 ```
 mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N] [--max-idle-minutes N]
-          [--gateway NAME | --api-key] [--artifact PATH]... [--visual] [--effort E] "prompt"
+          [--gateway NAME | --api-key] [--artifact PATH]... [--effort E] "prompt"
 mc run    --spec -            # full RunSpec as JSON on stdin (the remote-safe form)
 mc ls     [--json]
-mc show   <run-id>            # full record, both axes, verify evidence, cost
+mc show   <run-id>            # full record, recent events, cost
 mc tail   <run-id>            # follow the event stream
 mc kill   <run-id>
 mc resume <run-id> [--fresh [--at SHA]] "follow-up"

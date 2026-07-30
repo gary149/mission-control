@@ -1,7 +1,8 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
+import { isAbsolute, resolve, sep } from "node:path";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAdapter } from "./adapters/registry.ts";
@@ -9,8 +10,24 @@ import { resolveAuth } from "./auth.ts";
 import { loadConfig, runDir } from "./config.ts";
 import { getRun, insertEvent, insertRun, updateRun } from "./db.ts";
 import { PreflightError, type Run, type RunSpec } from "./types.ts";
-import { artifactStaysInside } from "./verify.ts";
 import { createWorkdir, createWorkdirFromCheckpoint } from "./workspace.ts";
+
+/**
+ * Pure path math: a declared artifact must be relative and stay inside the
+ * (hypothetical) workdir. Preflight-only input sanitization, independent of
+ * any output checking - an artifact path is a prompt-injection hint ("write
+ * outputs to these paths"), not something mc verifies exists.
+ */
+function artifactStaysInside(artifact: string): boolean {
+  // Empty/whitespace and "." (or any relative path that nets to the workdir
+  // itself) declare no actual file - the workdir root is a directory, not an
+  // artifact.
+  if (!artifact.trim()) return false;
+  if (isAbsolute(artifact)) return false;
+  const root = resolve(sep, "mc-root", "work");
+  const resolved = resolve(root, artifact);
+  return resolved.startsWith(root + sep);
+}
 
 function newRunId(): string {
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -117,13 +134,6 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
   } else {
     ({ workdir, isGit } = createWorkdir(id, spec.cwd));
   }
-  // HEAD at launch anchors the commit-aware git_effect check: work an agent
-  // COMMITS (leaving a clean tree) must still count as an effect.
-  let gitHeadAtLaunch: string | null = null;
-  if (isGit) {
-    const head = spawnSync("git", ["-C", workdir, "rev-parse", "HEAD"], { encoding: "utf8" });
-    gitHeadAtLaunch = head.status === 0 ? head.stdout.trim() : null; // null: unborn branch, porcelain-only
-  }
 
   const dir = runDir(id);
   mkdirSync(dir, { recursive: true });
@@ -137,7 +147,6 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
         bin: detection.path,
         resume_session_id: options.fresh ? undefined : (parent?.session_id ?? undefined),
         checkpoint,
-        git_head_at_launch: gitHeadAtLaunch ?? undefined,
       },
       null,
       2,
@@ -157,7 +166,6 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
     workdir,
     session_id: null,
     exit: "queued",
-    verdict: "pending",
     started_at: new Date().toISOString(),
     ended_at: null,
     cost_usd: null,
@@ -176,7 +184,6 @@ export function launch(spec: RunSpec, options: LaunchOptions = {}): Run {
     supervisor_pid: null,
     stderr_path: join(dir, "stderr.log"),
     artifacts: spec.artifacts,
-    verify_evidence: null,
     notified: false,
   };
   insertRun(run);

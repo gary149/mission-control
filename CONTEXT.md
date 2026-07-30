@@ -1,15 +1,15 @@
 # Mission Control
 
 The control plane for delegated agent work: a per-host ledger of runs that mission-control
-itself launched on coding-agent harnesses, with independent verification and push delivery.
-It exists because self-reported agent success is unreliable and delegated work was
-previously untracked glue.
+itself launched on coding-agent harnesses, with push delivery of the result. It exists
+because delegated work was previously untracked glue: no durable record of what ran,
+where, for how much, and whether the process itself actually finished cleanly.
 
 ## Language
 
 **Naming principle** (decided 2026-07-22): stay as close as possible to Claude Code's
 own vocabulary with as little invented abstraction as possible. A field gets an mc-specific
-name only when mc adds real semantics (Verdict, cost_basis, Harness). Hence `prompt` not
+name only when mc adds real semantics (cost_basis, Harness). Hence `prompt` not
 "goal", `session_id` not "session_ref".
 
 **Run**:
@@ -22,9 +22,10 @@ _Avoid_: task, job, session
 
 **Harness**:
 A coding-agent CLI that mission-control can launch headlessly (claude-code, codex, pi):
-it runs an agent loop against a workspace and produces checkable effects. A bare LLM API
-call is not a Harness — with nothing for the verifier to bite on, it stays outside the
-edge. Mission-control never runs an agent loop itself.
+it runs an agent loop against a workspace and produces a supervisable process with a
+real exit status. A bare LLM API call is not a Harness — there is no workspace, no
+process, nothing for a Supervisor to watch to termination. Mission-control never runs
+an agent loop itself.
 _Avoid_: agent, model, backend
 
 **Adapter**:
@@ -34,19 +35,16 @@ _Avoid_: driver, plugin, provider
 
 **Supervisor**:
 The detached per-run process that watches one Run to termination: tails events, enforces
-budget/wall-clock caps, runs the verifier, fires the notification, exits.
+budget/wall-clock caps, classifies the exit, fires the notification, exits.
 _Avoid_: daemon, watcher
 
 **Exit**:
-What the run's process did: succeeded, failed, killed, lost. One of the two status axes;
-says nothing about whether the claim is true.
-
-**Verdict**:
-Whether the checks the RunSpec declared passed, confirmed mechanically and independently
-of the agent's claims: verified, failed_verification, unverifiable, needs_human_look.
-Verified promises nothing about quality or taste — that judgment belongs to the operator
-or the orchestrating agent, and subjective work terminates at needs_human_look.
-_Avoid_: status, result, QA
+What the run's process did: succeeded, failed, killed, lost. Derived from the process's
+real termination (exit code, signal, kill request), never from the agent's own claim of
+success — a harness that exits 0 on an errored final turn (pi, confirmed) still lands
+`failed`. Says nothing about the quality of the output; that judgment belongs to the
+operator or the orchestrating agent.
+_Avoid_: status, result, verdict, QA
 
 **Host**:
 The single machine a Run belongs to. Ids, ledger, lineage, and notifications are

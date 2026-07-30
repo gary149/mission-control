@@ -20,20 +20,20 @@ set -euo pipefail
 payload="$(cat)"
 api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
 
-read -r id title exit_ verdict workdir <<<"$(printf '%s' "$payload" | python3 -c '
+read -r id title exit_ workdir <<<"$(printf '%s' "$payload" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-print(d["id"], json.dumps(d["title"]), d["exit"], d["verdict"], d["workdir"])
+print(d["id"], json.dumps(d["title"]), d["exit"], d["workdir"])
 ')"
 
-text="mc ${id} exit=${exit_} verdict=${verdict} - ${title}"
+text="mc ${id} exit=${exit_} - ${title}"
 curl -fsS -X POST "$api/sendMessage" \
   --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
   --data-urlencode "text=${text}" >/dev/null
 
 # Best-effort: post each declared artifact that still exists (relative to the
 # run's own workdir - a run that never produced its artifact just sends the
-# text above, which already carries the verdict that says so).
+# text above with nothing attached).
 printf '%s' "$payload" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -72,6 +72,5 @@ Push delivery must not depend on anyone running `mc ls`:
 - This posts every declared artifact unconditionally; for a run with many or large
   artifacts, filter `artifacts` in the python snippet above (by extension, by name)
   before wiring it to something with real chat traffic.
-- A run with no declared `--artifact`s still gets the text message - `verdict` alone
-  (`needs_human_look`, `unverifiable`, ...) is often the useful part for visual or
-  exploratory work.
+- A run with no declared `--artifact`s still gets the text message - `exit` alone is
+  often the useful part for exploratory work with nothing to attach.

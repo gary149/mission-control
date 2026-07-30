@@ -15,18 +15,18 @@ hand-started, untracked runs, so "make mc see everything" was a live temptation.
 
 A Run exists if and only if mission-control launched it. One Run = one harness session;
 subagents a harness spawns internally are inside the Run, never rows. Bare LLM API calls
-are not Runs (no workspace, nothing to verify). Hosts stand alone: no fleet concept, no
-cross-host ids or lineage.
+are not Runs (no workspace, no process for a Supervisor to watch to termination). Hosts
+stand alone: no fleet concept, no cross-host ids or lineage.
 
 ## Consequences
 
-- Every Run row carries the full guarantees: an archived spec, declared checks, a
-  supervisor that watched it end-to-end, a meaningful verdict. No second, weaker class of
-  row exists.
+- Every Run row carries the full guarantees: an archived spec, a supervisor that watched
+  it end-to-end, an honest `exit` derived from the process's real termination, never the
+  agent's own claim. No second, weaker class of row exists.
 - Hand-started work stays untracked by design; the remedy is "launch it through mc," not
   adoption. Historical visibility of everything else is agentsview's job, reachable via
   session_id.
 - The ledger's semantics never depend on harness-specific discovery heuristics, which is
   what made openclaw's two-schema split (native vs ACP) unfixable.
 - If a genuine adoption need emerges, it must come back through this ADR, likely as an
-  explicitly labeled unverifiable row class rather than a loosened Run definition.
+  explicitly labeled second-class row rather than a loosened Run definition.

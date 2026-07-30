@@ -101,8 +101,8 @@ export const pi: HarnessAdapter = {
       // Real members of pi's AgentSessionEvent union (confirmed against the
       // installed @earendil-works/pi-coding-agent 0.81.0 type defs), fired on
       // ordinary long runs - compaction, retries, the message queue, session
-      // metadata. Previously unhandled: fell to `default` and capped the
-      // verdict at unverifiable on every run long enough to trigger them.
+      // metadata. Previously unhandled: fell to `default` and logged a noisy
+      // unknown-native-event error on every run long enough to trigger them.
       case "queue_update":
       case "compaction_start":
       case "compaction_end":

@@ -4,24 +4,24 @@ You are an orchestrator: you launch runs, mc supervises and verifies them, you a
 what actually happened. This is the distilled practice from real fleet operation -
 every rule below exists because its absence burned a real orchestrator.
 
-## The two axes, never conflated
+## Exit is a process fact, not the agent's word for it
 
-`exit` is what the process did (succeeded/failed/killed/lost). `verdict` is whether the
-declared checks passed, confirmed mechanically (verified/failed_verification/
-unverifiable/needs_human_look). Done means **succeeded AND verified**. A run's own
-"I finished successfully!" text is a claim, not a result; mc exists because such claims
-are unreliable. Never report delegated work as done on exit alone.
-
-`needs_human_look` is terminal for subjective work (`--visual`): do not loop relaunching
-trying to turn it into `verified` - it will never happen. Hand it to the human.
+`exit` (`queued`/`running`/`succeeded`/`failed`/`killed`/`lost`) is derived from what
+the process actually did - its real exit code, a kill signal, a kill request - never
+from the agent's own claim of success. A run's own "I finished successfully!" text is
+a claim, not a result: some harnesses (pi, confirmed) exit the process with code 0 even
+when the final turn itself reported an error, and mc classifies that `failed` anyway.
+`exit` says nothing about the *quality* of the output, though - whether the deliverable
+is actually right is a judgment you or the operator still have to make by looking, the
+same way you would for any other delegated work.
 
 ## Launching
 
-- **Declare every deliverable**: `--artifact path` (repeatable). Verification only
-  bites on declared outputs; a run that builds the right thing undeclared can at best
-  verdict `unverifiable`, and you lose the mechanical proof you wanted.
-- **One mission per run.** Bundled missions produce one blended verdict you cannot act
-  on. Split them; lineage will keep them related.
+- **Declare every deliverable**: `--artifact path` (repeatable). It is injected into
+  the prompt as where to write the output - a hint the harness reads, not a check mc
+  runs after the fact. Confirming the output is genuinely correct is on you.
+- **One mission per run.** A bundled multi-part mission produces one `exit` you cannot
+  attribute to a specific part of it. Split them; lineage will keep them related.
 - **Caps are not optional.** `--max-minutes` for wall clock, `--max-idle-minutes` for
   stalls (default 30). `--budget` (USD) only where cost is genuinely metered
   (`opencode`, `pi` today - mc refuses it elsewhere rather than pretend).
@@ -34,10 +34,10 @@ trying to turn it into `verified` - it will never happen. Hand it to the human.
   db (below) is always there. `mc show <id>` is for inspection - a JSON record followed
   by human-formatted summary lines - so do not pipe it to a JSON parser. Never parse
   the human table either; it is for humans and it will change.
-- **Read `verify_evidence` check by check before discarding a run.** A `killed` run
-  whose artifact checks all pass is salvage, not garbage: the work exists in its
-  workdir right now. If the record has a `session_id`, `mc resume <id>` continues in
-  that same workdir. If it does not (a mid-run kill can land before some harnesses
+- **Look at the actual output before discarding a run, `killed` included.** A `killed`
+  run's workdir still holds whatever the harness had written up to that point - real
+  progress, not garbage. If the record has a `session_id`, `mc resume <id>` continues
+  in that same workdir. If it does not (a mid-run kill can land before some harnesses
   yield their session reference), the outputs are still on disk in `runs/<id>/work` -
   integrate them directly, or restart from the last committed checkpoint with
   `mc resume <id> --fresh --at <sha>`, which needs no session. Restarting from scratch

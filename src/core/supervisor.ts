@@ -9,7 +9,6 @@ import { loadConfig, runDir } from "./config.ts";
 import { eventsAfter, getRun, insertEvent, updateRun } from "./db.ts";
 import { notifyTerminal } from "./notify.ts";
 import type { Run, RunSpec } from "./types.ts";
-import { verify } from "./verify.ts";
 
 /** Child env is built additively from empty - never inherited (SPEC: Auth & billing). */
 function baseEnv(): Record<string, string> {
@@ -63,7 +62,6 @@ export async function supervise(runId: string): Promise<void> {
   const dir = runDir(runId);
   const stored = JSON.parse(readFileSync(run.spec_path, "utf8"));
   const spec = stored as RunSpec;
-  const isGit: boolean = stored.is_git;
   const binPath: string = stored.bin;
 
   const adapter = getAdapter(spec.harness);
@@ -144,10 +142,6 @@ export async function supervise(runId: string): Promise<void> {
     }, Math.max(1000, Math.min(30_000, idleMs / 4)));
   }
 
-  // Parser health: blindness (unparsed lines, or never seeing a terminal result
-  // event) must cap the verdict at unverifiable, not pass silently.
-  let parseErrors = 0;
-  let sawResult = false;
   let sawHarnessError = false;
   // Authoritative terminal outcome: some harnesses (pi, confirmed) exit the
   // process with code 0 even when the FINAL turn errored or aborted - process
@@ -172,13 +166,9 @@ export async function supervise(runId: string): Promise<void> {
     lastActivity = Date.now();
     const mapped = adapter.mapLine(clean);
     for (const event of mapped.events) {
-      // Parser health tracks BLINDNESS (lines mc could not read), never
-      // harness-reported errors - a cleanly parsed failure is still a parse.
       const note = (event.payload as { note?: string } | null)?.note;
-      if (event.kind === "error" && (note === "unparsed" || note === "unknown-native-event")) parseErrors++;
       if (event.kind === "error" && note === "harness-error") sawHarnessError = true;
       if (event.kind === "turn_end") {
-        sawResult = true;
         lastTurnError = (event.payload as { is_error?: boolean } | null)?.is_error === true;
       }
       insertEvent(runId, event.kind, event.payload);
@@ -240,7 +230,6 @@ export async function supervise(runId: string): Promise<void> {
 
   // Classification: a run is `killed` only once the process actually died from
   // a signal (cap or `mc kill`); the CLI never pre-marks terminal state.
-  const current = getRun(runId)!;
   // `mc kill` runs in a separate CLI process: it writes a kill_requested
   // status_change event and sends SIGTERM, but the run stays `running` until
   // THIS process observes the child actually exit. A harness that traps
@@ -262,24 +251,13 @@ export async function supervise(runId: string): Promise<void> {
   // A harness that dies with no harness-reported error on stdout (kimi-code's
   // probed failure mode) would otherwise leave its reason ONLY in stderr.log -
   // invisible to mc tail/show and the notify payload. Synthesize the reason
-  // into the stream. "stderr-tail" is not in the parse-health counted set, so
-  // verdicts are unaffected.
+  // into the stream.
   if (exit !== "succeeded" && !sawHarnessError && stderrTail.length > 0) {
     insertEvent(runId, "error", { note: "stderr-tail", excerpt: stderrTail.join("\n").slice(-1000) });
   }
 
-  const parserHealthy = parseErrors === 0 && sawResult;
-  const headAtLaunch = typeof stored.git_head_at_launch === "string" ? stored.git_head_at_launch : null;
-  const verification = verify({ ...current, exit } as Run, spec, exitCode, isGit, parserHealthy, headAtLaunch, lastTurnError);
-  insertEvent(runId, "verify_result", { verdict: verification.verdict, checks: JSON.parse(verification.evidence) });
-
-  updateRun(runId, {
-    exit,
-    verdict: verification.verdict,
-    ended_at: new Date().toISOString(),
-    verify_evidence: verification.evidence,
-  });
-  insertEvent(runId, "exited", { exit, exit_code: exitCode, verdict: verification.verdict });
+  updateRun(runId, { exit, ended_at: new Date().toISOString() });
+  insertEvent(runId, "exited", { exit, exit_code: exitCode });
 
   await notifyTerminal(getRun(runId)!, config);
 }
