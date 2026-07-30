@@ -259,7 +259,6 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let maxIdleMinutes: number | null = null;
   let gateway: string | null = null;
   let apiKey = false;
-  let visual = false;
   const artifacts: string[] = [];
   const positional: string[] = [];
 
@@ -289,7 +288,6 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       case "--max-idle-minutes": maxIdleMinutes = nextNonNegative(); break;
       case "--gateway": gateway = next(); break;
       case "--api-key": apiKey = true; break;
-      case "--visual": visual = true; break;
       case "--artifact": artifacts.push(next()); break;
       case "--effort":
         fail("--effort is not supported in v0 (no harness passthrough is verified; see SPEC.md)");
@@ -312,7 +310,6 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       prompt,
       cwd,
       artifacts,
-      visual,
       budget_usd: budget,
       max_minutes: maxMinutes,
       max_idle_minutes: maxIdleMinutes,
@@ -339,7 +336,6 @@ async function readSpecFromStdin(): Promise<RunSpec> {
     prompt: parsed.prompt,
     cwd: parsed.cwd ?? null,
     artifacts: parsed.artifacts ?? [],
-    visual: parsed.visual ?? false,
     budget_usd: parsed.budget_usd ?? null,
     max_minutes: parsed.max_minutes ?? null,
     max_idle_minutes: parsed.max_idle_minutes ?? null,
@@ -350,8 +346,8 @@ async function readSpecFromStdin(): Promise<RunSpec> {
 /**
  * mc harness check: never mock the boundary we own. Runs the REAL installed CLI
  * end to end on a trivial deterministic task and asserts the full path - launch,
- * events, session_id, exit, verify, cost extraction, and native resume when
- * declared. Costs cents by design; run when writing an adapter or after a CLI
+ * events, session_id, exit, artifact content, cost extraction, and native resume
+ * when declared. Costs cents by design; run when writing an adapter or after a CLI
  * update. The runs it creates are ordinary ledger rows (visible in mc ls).
  */
 async function harnessCheck(args: string[]): Promise<void> {
@@ -395,7 +391,6 @@ async function harnessCheck(args: string[]): Promise<void> {
     prompt: `Create a file mc-check.txt containing exactly this one line: ${marker}`,
     cwd: null,
     artifacts: ["mc-check.txt"],
-    visual: false,
     budget_usd: null,
     max_minutes: 10,
     max_idle_minutes: 10,
@@ -406,7 +401,6 @@ async function harnessCheck(args: string[]): Promise<void> {
   const done = await waitTerminal(run.id, 10 * 60_000);
 
   report("exit=succeeded", done.exit === "succeeded", `got ${done.exit}`);
-  report("verdict=verified", done.verdict === "verified", `got ${done.verdict}`);
   report("session_id captured", done.session_id != null, done.session_id ?? "missing");
   const content = existsSync(join(done.workdir, "mc-check.txt"))
     ? readFileSync(join(done.workdir, "mc-check.txt"), "utf8")
@@ -455,33 +449,33 @@ USAGE
   mc <command> [options]
 
 COMMANDS
-  run           Launch a tracked, isolated, verified run on a harness
+  run           Launch a tracked, isolated run on a harness
   resume <id>   Continue a run with a follow-up prompt: a new linked run that
-                inherits harness/model/auth/artifacts/visual/caps. Default:
+                inherits harness/model/auth/artifacts/caps. Default:
                 native session resume in the SAME workdir. With --fresh
                 [--at SHA]: checkpoint restart - NEW worktree at the commit,
                 NEW session (for escaping stuck or degraded sessions).
-                Overrides: --artifact (replaces inherited list), --visual,
-                --no-visual, --max-minutes, --max-idle-minutes, --budget
+                Overrides: --artifact (replaces inherited list),
+                --max-minutes, --max-idle-minutes, --budget
   reap          Cron-safe: mark dead-supervisor runs lost, deliver pending
                 notifications (e.g. */10 * * * * mc reap)
   ls            List runs; also reaps lost runs and re-delivers missed notifications
-  show <id>     Full run record, verification evidence, recent events
+  show <id>     Full run record, recent events
   tail <id>     Follow a run's event stream until it terminates
   kill <id>     Request termination (state lands when the process actually dies)
   harness ls    Adapters: capabilities, install status, live auth probes
   harness check <name> [--gateway G] [--model M]
                 Live end-to-end validation against the REAL CLI (costs cents):
-                launch, verify, session_id, cost/token extraction, native resume
+                launch, session_id, artifact content, cost/token extraction,
+                native resume
   help          This page (also: -h, --help anywhere)
 
 RUN OPTIONS
   --harness H       Required. Registered: ${harnesses}
   --model M         Model id; gateway mode needs a provider prefix (moonshotai/kimi-k3)
   --cwd DIR         Git repo to work on; isolated via git worktree (non-git refused)
-  --artifact PATH   Declared deliverable, workdir-relative; the verifier checks it
-                    exists and is non-empty (repeatable)
-  --visual          Output needs human eyes; verdict terminates at needs_human_look
+  --artifact PATH   Declared deliverable, workdir-relative; injected into the
+                    prompt as where to write it (repeatable)
   --max-minutes N   Wall-clock cap: kill + notify when exceeded
   --max-idle-minutes N
                     Stall cap: kill when the harness emits nothing on
@@ -498,11 +492,12 @@ AUTH (per run; default = subscription)
   gateway        OpenRouter-compatible routing; key env var must be resident here
   Credentials never cross machines; missing ones fail closed at preflight.
 
-STATUS (two axes, never conflated)
+STATUS
   exit      queued | running | succeeded | failed | killed | lost
-  verdict   pending | verified | failed_verification | unverifiable | needs_human_look
-  DONE means succeeded AND verified: declared checks passed, confirmed mechanically,
-  never taken from the agent's own claims.
+  What the run's process did. A harness that exits 0 but reports a failed
+  final turn (pi, confirmed) still lands here as failed, never a false green -
+  but exit is a process-completion signal only, not a claim about output
+  quality; that judgment is the operator's or orchestrator's to make.
 
 FILES & ENV
   ~/.mission-control/       state root (override: MC_HOME)
@@ -519,7 +514,7 @@ EXAMPLES
   mc run --harness claude-code --artifact out/report.md "write the report"
   mc run --harness claude-code --gateway openrouter --model moonshotai/kimi-k3 \\
         --max-minutes 30 --artifact hello.txt "build hello.txt"
-  mc ls --json | jq '.[0].verdict'
+  mc ls --json | jq '.[0].exit'
   mc harness ls
 
 FOR AGENTS
@@ -559,14 +554,13 @@ export async function cliMain(argv: string[]): Promise<void> {
           console.log("no runs");
           break;
         }
-        const header = ["ID", "TITLE", "HARNESS", "MODEL", "EXIT", "VERDICT", "COST", "TOKENS", "DURATION", "AGE"];
+        const header = ["ID", "TITLE", "HARNESS", "MODEL", "EXIT", "COST", "TOKENS", "DURATION", "AGE"];
         const rows = runs.map((r) => [
           r.id,
           r.title.slice(0, 40),
           r.harness,
           (r.model ?? "").slice(0, 24),
           r.exit,
-          r.verdict,
           r.cost_usd != null ? `$${r.cost_usd.toFixed(2)}` : r.cost_basis === "flat_subscription" ? "plan" : "-",
           tokensCell(r),
           duration(r.started_at, r.ended_at),
@@ -615,7 +609,7 @@ export async function cliMain(argv: string[]): Promise<void> {
           // retry path; this is a read command.
           const current = (await reapLostRuns([getRun(run.id)!], false))[0]!;
           if (!["running", "queued"].includes(current.exit) && eventsAfter(run.id, seq).length === 0) {
-            console.log(`-- terminal: exit=${current.exit} verdict=${current.verdict} --`);
+            console.log(`-- terminal: exit=${current.exit} --`);
             break;
           }
           await sleep(500);
@@ -659,16 +653,13 @@ export async function cliMain(argv: string[]): Promise<void> {
 
       case "resume": {
         const parent = requireRun(args[0]);
-        // A continuation inherits everything verification-relevant from the
-        // parent's archived spec - harness/model/auth AND artifacts/visual/
-        // caps - unless explicitly overridden. Silently dropping the parent's
-        // declared checks was how continuation runs lost their verifiability
-        // (fleet evidence: every artifact-less resume capped below verified).
+        // A continuation inherits the parent's archived spec - harness/model/
+        // auth/artifacts/caps - unless explicitly overridden, so a follow-up
+        // never silently drops what the parent declared.
         const parentStored = JSON.parse(readFileSync(parent.spec_path, "utf8"));
         let maxMinutes: number | null | undefined;
         let maxIdleMinutes: number | null | undefined;
         let budget: number | null | undefined;
-        let visual: boolean | undefined;
         let fresh = false;
         let at: string | undefined;
         const artifacts: string[] = [];
@@ -695,8 +686,6 @@ export async function cliMain(argv: string[]): Promise<void> {
             case "--max-minutes": maxMinutes = nextPositive(); break;
             case "--max-idle-minutes": maxIdleMinutes = nextNonNegative(); break;
             case "--budget": budget = nextPositive(); break;
-            case "--visual": visual = true; break;
-            case "--no-visual": visual = false; break;
             case "--fresh": fresh = true; break;
             case "--at": at = next(); break;
             default:
@@ -714,7 +703,6 @@ export async function cliMain(argv: string[]): Promise<void> {
             prompt,
             cwd: null,
             artifacts: artifacts.length > 0 ? artifacts : (parentStored.artifacts ?? []),
-            visual: visual ?? Boolean(parentStored.visual),
             budget_usd: budget !== undefined ? budget : (parentStored.budget_usd ?? null),
             max_minutes: maxMinutes !== undefined ? maxMinutes : (parentStored.max_minutes ?? null),
             max_idle_minutes: maxIdleMinutes !== undefined ? maxIdleMinutes : (parentStored.max_idle_minutes ?? null),
@@ -771,7 +759,7 @@ export async function cliMain(argv: string[]): Promise<void> {
                 // kimi-code requires a model in every mode; give the probe one so
                 // it reports credential readiness, not the model requirement.
                 harness: adapter.name, model: mode === "gateway" || adapter.name === "kimi-code" ? "probe/probe" : null, prompt: "probe",
-                cwd: null, artifacts: [], visual: false, budget_usd: null, max_minutes: null, max_idle_minutes: null,
+                cwd: null, artifacts: [], budget_usd: null, max_minutes: null, max_idle_minutes: null,
                 auth: mode === "gateway" ? { mode, gateway: "openrouter" } : { mode },
               };
               const resolved = resolveAuth(spec, adapter, config);

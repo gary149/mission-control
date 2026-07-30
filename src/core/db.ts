@@ -25,7 +25,6 @@ export function openDb(): DatabaseSync {
       workdir TEXT NOT NULL,
       session_id TEXT,
       exit TEXT NOT NULL,
-      verdict TEXT NOT NULL,
       started_at TEXT NOT NULL,
       ended_at TEXT,
       cost_usd REAL,
@@ -41,7 +40,6 @@ export function openDb(): DatabaseSync {
       supervisor_pid INTEGER,
       stderr_path TEXT NOT NULL,
       artifacts TEXT NOT NULL,
-      verify_evidence TEXT,
       notified INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS events (
@@ -57,12 +55,26 @@ export function openDb(): DatabaseSync {
   return db;
 }
 
+/**
+ * Legacy columns from the verifier (removed from the schema and from every
+ * read/write path) that may still exist on a database created before this
+ * change. Deliberately NEVER dropped: a DROP COLUMN here would silently
+ * destroy every historical verdict on a real fleet ledger the moment an
+ * upgraded `mc` opens it, which is a far bigger and less reversible action
+ * than the feature removal itself asked for. `verdict` was `NOT NULL` with
+ * no DEFAULT, so an old database's constraint must still be satisfied on
+ * every future insert - see insertRun, which appends a harmless placeholder
+ * for exactly the columns recorded here, and only for them.
+ */
+let legacyVerdictColumns: string[] = [];
+
 /** Rename-only migrations for pre-claude-shape databases (goal/session_ref era). */
 function migrate(d: DatabaseSync): void {
   const columns = (d.prepare("PRAGMA table_info(runs)").all() as { name: string }[]).map((c) => c.name);
   if (columns.includes("goal")) d.exec("ALTER TABLE runs RENAME COLUMN goal TO prompt");
   if (columns.includes("session_ref")) d.exec("ALTER TABLE runs RENAME COLUMN session_ref TO session_id");
   if (!columns.includes("max_idle_minutes")) d.exec("ALTER TABLE runs ADD COLUMN max_idle_minutes REAL");
+  legacyVerdictColumns = ["verdict", "verify_evidence"].filter((c) => columns.includes(c));
 }
 
 /** Test-only: drop the cached handle so a new MC_HOME takes effect. */
@@ -85,19 +97,26 @@ function dollarKeys(obj: Record<string, unknown>): Record<string, unknown> {
 
 const RUN_COLUMNS = [
   "id", "parent_run_id", "root_run_id", "harness", "model", "host", "prompt", "title",
-  "spec_path", "workdir", "session_id", "exit", "verdict", "started_at", "ended_at",
+  "spec_path", "workdir", "session_id", "exit", "started_at", "ended_at",
   "cost_usd", "cost_basis", "tokens_in", "tokens_out", "budget_usd", "max_minutes", "max_idle_minutes",
-  "auth_mode", "gateway", "pid", "supervisor_pid", "stderr_path", "artifacts", "verify_evidence", "notified",
+  "auth_mode", "gateway", "pid", "supervisor_pid", "stderr_path", "artifacts", "notified",
 ] as const;
 
 export function insertRun(run: Run): void {
+  openDb(); // ensures migrate() has run and legacyVerdictColumns is current for this MC_HOME
   const params = dollarKeys({
     ...run,
     artifacts: JSON.stringify(run.artifacts),
     notified: run.notified ? 1 : 0,
+    // Placeholder values ONLY for legacy NOT NULL columns still present on
+    // this specific database (see legacyVerdictColumns) - satisfies the old
+    // constraint without mc ever computing or reading a real verdict again.
+    ...(legacyVerdictColumns.includes("verdict") ? { verdict: "n/a" } : {}),
+    ...(legacyVerdictColumns.includes("verify_evidence") ? { verify_evidence: null } : {}),
   });
-  const columns = RUN_COLUMNS.join(", ");
-  const placeholders = RUN_COLUMNS.map((c) => `$${c}`).join(", ");
+  const allColumns = [...RUN_COLUMNS, ...legacyVerdictColumns];
+  const columns = allColumns.join(", ");
+  const placeholders = allColumns.map((c) => `$${c}`).join(", ");
   openDb().prepare(`INSERT INTO runs (${columns}) VALUES (${placeholders})`).run(params as never);
 }
 
