@@ -31,8 +31,12 @@ d = json.load(sys.stdin)
 print(d["exit"], d["workdir"])
 ')"
 
-# Only a run that actually succeeded is a landing candidate - failed/killed/lost
-# runs have nothing worth rebasing in, and a run still `queued`/`running` never
+# `succeeded` is a PROCESS fact (clean exit), not a quality judgment - mc does
+# not verify work. Gating on it here only selects which runs ENTER the landing
+# path; the merge queue's checkCommand is the sole actual gate, so make that
+# command a real build+test, not a placeholder. killed/lost runs may still
+# hold salvageable work in their workdir - they are excluded from AUTOMATIC
+# landing, not from manual integration. A run still `queued`/`running` never
 # reaches this hook (it only fires on terminal transitions).
 [ "$exit_" = "succeeded" ] || exit 0
 
