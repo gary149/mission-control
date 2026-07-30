@@ -649,9 +649,23 @@ operators who had configured a notify hook that silently never fired - a typo'd 
 a script that forgot to read stdin, a webhook URL that 404'd - and only discovered it
 much later, by absence. `mc init` writes the config AND immediately fires a synthetic
 `{test: true, note: "mc init verification"}` push through every hook it just named,
-reporting delivered/not delivered honestly. `mc init --check` is the same verification
-run read-only, any time later, for CI or a periodic health check. Verify, don't
-assume.
+reporting delivered/not delivered honestly - and requires EVERY configured channel
+(exec and/or webhook, if a section has both) to deliver, not just one of them: that
+"any is enough" reading belongs to real notification delivery (one working channel is
+enough for the operator to actually get told), not to a health check whose entire job
+is to catch a channel that's silently broken. `mc init --check` is the same
+verification run read-only, any time later, for CI or a periodic health check - and it
+distinguishes a section that failed to PARSE (e.g. an unterminated quoted exec value)
+from one that's simply unconfigured, since `loadConfig()`'s deliberate leniency (skip a
+malformed line rather than reject the whole file) would otherwise make the two
+indistinguishable. Values written by `mc init` are TOML-escaped (backslash and double
+quote), so an exec command containing either - a path with a space needing its own
+quotes, for instance - round-trips intact instead of producing invalid TOML that
+silently truncates on the next read. `--install-reap` embeds the current invocation's
+`MC_HOME` explicitly in the installed line when it overrides the default, because cron
+jobs run with their own minimal environment and would otherwise reap against
+`~/.mission-control` regardless of where this invocation was actually configured
+against. Verify, don't assume.
 
 There is no SSH code in mc. Remote machines run their own install, and the caller owns
 transport. The remote-safe invocation is `ssh box mc run --spec - < task.json` (spec over
