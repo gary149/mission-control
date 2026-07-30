@@ -3,11 +3,11 @@
 ![Mission Control](docs/hero.jpg)
 
 **You pick the harness, the model, and the task. Your orchestrator fires it off, gets
-pinged with a verified result, and just keeps moving.**
+pinged with the result, and just keeps moving.**
 
-`mc` launches an agent CLI headlessly, supervises it to completion, mechanically checks
-the outputs it promised, and reports two independent truths per run: `exit` (did the
-process finish cleanly) and `verdict` (did the work actually check out).
+`mc` launches an agent CLI headlessly, supervises it to completion, and reports `exit`:
+what the process actually did (`succeeded`, `failed`, `killed`, `lost`) - not what the
+agent claimed.
 
 ## Install
 
@@ -46,7 +46,7 @@ launch, event parsing, session capture, native resume.
 **Ask your agent:**
 
 ```text
-Use mission control to build a playable browser FPS on claude code with kimi-k3 via openrouter, ping me when verified.
+Use mission control to build a playable browser FPS on claude code with kimi-k3 via openrouter, ping me when done.
 ```
 
 **Or directly:**
@@ -59,17 +59,17 @@ mc run --harness claude-code --max-minutes 360 --artifact index.html \
 
 Yes, really - give it the afternoon and close the laptop. Each run executes in its own
 git worktree (collision isolation between runs, not an OS sandbox - the agent runs
-full-auto), and `verified` means mc mechanically checked the declared artifact exists as
-a non-empty regular file - not that the agent claimed success.
+full-auto), and `exit` reports what the process actually did - not what the agent
+claimed.
 
 ## Commands
 
 ```sh
 mc run --harness H [--model M] [--gateway openrouter] [--budget 99] \
-       [--max-minutes 360] [--max-idle-minutes 30] [--artifact PATH] [--visual] "task"
-mc ls                        # every run: exit + verdict + cost + tokens + duration
+       [--max-minutes 360] [--max-idle-minutes 30] [--artifact PATH] "task"
+mc ls                        # every run: exit + cost + tokens + duration
 mc tail <id>                 # live event stream - tool calls, subagents, cost ticking
-mc show <id>                 # full record + verification evidence
+mc show <id>                 # full record + recent events
 mc resume <id> "add tests"   # continue the session, new linked run, same workdir
 mc resume <id> --fresh --at <sha> "…"   # restart clean from a git checkpoint
 mc kill <id>
@@ -111,9 +111,9 @@ proves the wiring against the real CLI before you rely on it.
 
 ## Notifications
 
-One push per finished run, carrying both `exit` and `verdict` - and, when a run doesn't
-succeed, the reason it ended (exit code, budget cap, harness error, or a dead
-supervisor), so you learn why without digging through logs:
+One push per finished run, carrying `exit` - and, when a run doesn't succeed, the
+reason it ended (exit code, budget cap, harness error, or a dead supervisor), so you
+learn why without digging through logs:
 
 ```toml
 # ~/.mission-control/config.toml

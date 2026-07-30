@@ -20,7 +20,7 @@ payload="$(cat)"
 curl -fsS -X POST http://127.0.0.1:PORT/hooks/wake \
   -H "Authorization: Bearer $(cat /home/hermes/.hermes/auth-token)" \
   -H 'Content-Type: application/json' \
-  -d "{\"text\": \"mc run terminal: $(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f"{d[\"id\"]} exit={d[\"exit\"]} verdict={d[\"verdict\"]}")')\"}"
+  -d "{\"text\": \"mc run terminal: $(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f"{d[\"id\"]} exit={d[\"exit\"]}")')\"}"
 ```
 
 `~/.mission-control/config.toml` (as the hermes user):
@@ -47,7 +47,7 @@ mc resume <stuck-run-id> --fresh --at <checkpoint-sha> "fresh finalization missi
 ```
 
 Same lineage (`parent_run_id`), a new isolated worktree at the checkpoint, a
-new session, and the parent's declared artifacts/visual/caps inherited - no
+new session, and the parent's declared artifacts/caps inherited - no
 untracked git operations, no guardrail to route around.
 
 ## One harness trap worth keeping in the skill

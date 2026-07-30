@@ -37,8 +37,9 @@ Consequences of the boundary:
 - Stack examples ship as documentation (`docs/integrations/<stack>.md`), the
   way the SPEC always shipped a Telegram example: configs, not code.
 - Continuation logic (watchdogs, retry-on-incomplete, escalation) belongs to
-  the orchestrator. mc's obligations end at: reliable terminal push, honest
-  verdicts, and tracked continuation primitives (`mc resume`, `mc resume
-  --fresh`) so the orchestrator's loop never needs untracked side operations.
+  the orchestrator. mc's obligations end at: reliable terminal push, an
+  honest `exit` (never the agent's own claim of success), and tracked
+  continuation primitives (`mc resume`, `mc resume --fresh`) so the
+  orchestrator's loop never needs untracked side operations.
 - mc must stay fully usable with zero orchestrator: the CLI alone remains the
   complete product.

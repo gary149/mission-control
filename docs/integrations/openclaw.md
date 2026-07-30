@@ -15,7 +15,7 @@ OpenClaw's own config at delivery time - never stored in mc's config):
 set -euo pipefail
 payload="$(cat)"
 token="$(python3 -c 'import json; print(json.load(open("/root/.openclaw/openclaw.json"))["hooks"]["token"])')"
-text="mc run terminal: $(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f"{d[\"id\"]} exit={d[\"exit\"]} verdict={d[\"verdict\"]} - {d[\"title\"]}")')"
+text="mc run terminal: $(printf '%s' "$payload" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f"{d[\"id\"]} exit={d[\"exit\"]} - {d[\"title\"]}")')"
 curl -fsS -X POST http://127.0.0.1:18789/hooks/wake \
   -H "Authorization: Bearer $token" \
   -H 'Content-Type: application/json' \
@@ -41,9 +41,10 @@ Push delivery must not depend on anyone running `mc ls`:
 
 - Launch delegated coding work through `mc run` (declared `--artifact`s,
   `--max-minutes`) instead of raw `codex exec`/`claude -p` dispatch.
-- Before diagnosing a failed run, read `mc show <id>` including
-  `verify_evidence`, and the `stderr_path` file. Never guess.
+- Before diagnosing a failed run, read `mc show <id>` (the record, recent
+  events) and the `stderr_path` file. Never guess.
 - Continue work with `mc resume <id>` (same session) or
   `mc resume <id> --fresh` (checkpoint restart) - never a duplicate `mc run`.
-- Report both axes: `exit` is what the process did; `verdict` is what was
-  independently verified. DONE means succeeded AND verified.
+- Report `exit`: what the process actually did, not what the agent claimed.
+  It says nothing about output quality - look at the actual result before
+  calling delegated work done.

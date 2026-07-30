@@ -117,9 +117,9 @@ export const kimiCode: HarnessAdapter = {
       }
       case "meta": {
         if (obj.type === "session.resume_hint") {
-          // The only end-of-run marker in the stream - doubles as turn_end. If
-          // it is lost (upstream #1897), parser health degrades the verdict to
-          // unverifiable rather than green.
+          // The only end-of-run marker in the stream - doubles as turn_end and
+          // the sole source of session_id. If it is lost (upstream #1897), the
+          // run still completes, just with no session_id captured for resume.
           if (obj.session_id) update = { session_id: obj.session_id };
           events.push({ kind: "turn_end", payload: { is_error: false } });
         } else if (obj.type === "turn.step.retrying" || obj.type === "system.version") {

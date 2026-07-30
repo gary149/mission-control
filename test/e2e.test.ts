@@ -86,6 +86,14 @@ async function notifiedFor(id: string, timeoutMs = 5000): Promise<any> {
   }
 }
 
+/** No error-kind event of any kind reached the ledger for this run - the
+ * adapter treated everything it saw as either a mapped event or (for a
+ * genuine harness failure) a clean harness-error, never an unparsed/
+ * unknown-native-event drift signal. */
+function hasNoErrorEvents(eventsAfter: (id: string, seq: number) => any[], runId: string): boolean {
+  return !eventsAfter(runId, 0).some((e: any) => e.kind === "error");
+}
+
 function baseSpec(overrides: Record<string, unknown>) {
   return {
     harness: "claude-code",
@@ -93,7 +101,6 @@ function baseSpec(overrides: Record<string, unknown>) {
     prompt: "test prompt",
     cwd: null,
     artifacts: [] as string[],
-    visual: false,
     budget_usd: null,
     max_minutes: null,
     auth: { mode: "api_key" as const },
@@ -123,7 +130,7 @@ describe("mission-control e2e (stub harness)", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("run -> verified -> notified, with cost and clean child env", async () => {
+  test("run -> succeeded -> notified, with cost and clean child env", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
@@ -138,7 +145,6 @@ describe("mission-control e2e (stub harness)", () => {
 
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "verified");
     assert.ok(done.supervisor_pid > 0);
     assert.equal(done.cost_usd, 0.42);
     assert.equal(done.tokens_in, 1000);
@@ -149,19 +155,18 @@ describe("mission-control e2e (stub harness)", () => {
     // Event stream has the normalized shape.
     const events = eventsAfter(run.id, 0);
     const kinds = events.map((e: any) => e.kind);
-    for (const expected of ["started", "text", "tool_call", "subagent", "cost_update", "verify_result", "notify_result", "exited"]) {
+    for (const expected of ["started", "text", "tool_call", "subagent", "cost_update", "notify_result", "exited"]) {
       assert.ok(kinds.includes(expected), `missing event kind ${expected} in ${kinds}`);
     }
     // A clean run synthesizes nothing: no error events of any kind. The
     // fixture also emits a real tool_progress heartbeat (long-running Bash/
     // Read/WebFetch/TaskOutput calls) - a TOP-LEVEL type the adapter must
-    // treat as benign, or this assertion (and the "verified" verdict above)
-    // would fail with parser_health poisoned.
+    // treat as benign, or this assertion would fail.
     assert.ok(!kinds.includes("error"), `unexpected error events in ${kinds}`);
 
     // Subagent lifecycle (system subtypes) maps to STRUCTURED events, never to
-    // errors: the run stayed `verified` above (parser health un-poisoned), and
-    // the payloads carry the ids/descriptions an orchestrator renders from.
+    // errors, and the payloads carry the ids/descriptions an orchestrator
+    // renders from.
     const subagent = events.filter((e: any) => e.kind === "subagent").map((e: any) => e.payload as any);
     assert.equal(subagent.length, 5);
     assert.deepEqual(
@@ -174,11 +179,10 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(subagent[3].status, "completed");
     assert.equal(subagent[4].tasks[0].task_id, "wtga1fo90");
 
-    // Notification fired with both axes and no credential plumbing.
+    // Notification fired with exit and no credential plumbing.
     const payload = JSON.parse(readFileSync(join(home, "notified.json"), "utf8"));
     assert.equal(payload.id, run.id);
     assert.equal(payload.exit, "succeeded");
-    assert.equal(payload.verdict, "verified");
     assert.equal(payload.auth_mode, "api_key");
     assert.equal(payload.gateway, undefined);
 
@@ -190,7 +194,7 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(childEnv.DISABLE_AUTOUPDATER, "1");
   });
 
-  test("failing run -> failed + failed_verification, secrets scrubbed from logs", async () => {
+  test("failing run -> failed, secrets scrubbed from logs", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
@@ -198,7 +202,6 @@ describe("mission-control e2e (stub harness)", () => {
     const done = await waitTerminal(() => getRun(run.id));
 
     assert.equal(done.exit, "failed");
-    assert.equal(done.verdict, "failed_verification");
 
     // The failure REASON is a readable harness-error event, not a buried boolean.
     const err = eventsAfter(run.id, 0).find((e: any) => e.kind === "error" && (e.payload as any)?.note === "harness-error");
@@ -214,26 +217,6 @@ describe("mission-control e2e (stub harness)", () => {
     const stderrLog = readFileSync(done.stderr_path, "utf8");
     assert.ok(stderrLog.includes("***"));
     assert.ok(!stderrLog.includes("sk-test-not-real"));
-  });
-
-  test("visual run terminates at needs_human_look", async () => {
-    const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
-
-    const run = launch(baseSpec({ prompt: "make something pretty", artifacts: ["out.txt"], visual: true }) as never);
-    const done = await waitTerminal(() => getRun(run.id));
-    assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "needs_human_look");
-  });
-
-  test("run with no declared checks lands at unverifiable", async () => {
-    const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
-
-    const run = launch(baseSpec({ prompt: "no artifacts declared" }) as never);
-    const done = await waitTerminal(() => getRun(run.id));
-    assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "unverifiable");
   });
 
   test("preflight refuses --budget with adapter-correct advice in every mode", async () => {
@@ -259,7 +242,7 @@ describe("mission-control e2e (stub harness)", () => {
     const help = spawnSync(process.execPath, [entry, "help"], { encoding: "utf8", env: { ...process.env } }).stdout;
     for (const expected of [
       "run", "ls", "show", "tail", "kill", "harness ls", "resume", "reap",
-      "--harness", "--model", "--cwd", "--artifact", "--visual", "--no-visual",
+      "--harness", "--model", "--cwd", "--artifact",
       "--max-minutes", "--budget", "--gateway", "--api-key", "--spec",
       "--fresh", "--at SHA", "--max-idle-minutes",
       "subscription", "MC_HOME", "config.toml",
@@ -272,7 +255,7 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(runH.status, 0);
   });
 
-  test("codex: verified run, tokens without cost, scratch CODEX_HOME, clean env", async () => {
+  test("codex: succeeded run, tokens without cost, scratch CODEX_HOME, clean env", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun } = await import("../src/core/db.ts");
     process.env.OPENAI_API_KEY = "sk-codex-test-not-real";
@@ -289,7 +272,6 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(run.cost_basis, "unavailable");
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "verified");
     assert.equal(done.session_id, "fake-thread-0001");
     assert.equal(done.tokens_in, 500);
     assert.equal(done.tokens_out, 80);
@@ -310,9 +292,9 @@ describe("mission-control e2e (stub harness)", () => {
     );
   });
 
-  test("pi: verified run with ACCUMULATED per-turn cost and tokens (gateway mode)", async () => {
+  test("pi: succeeded run with ACCUMULATED per-turn cost and tokens (gateway mode)", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const envDump = join(home, "pi-env.json");
     const run = launch(
@@ -327,11 +309,9 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(run.cost_basis, "metered_reported");
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "verified");
-    // The fixture emits tool_execution_update (real pi progress noise) - if the
-    // adapter mishandled it, parser_health would fail and cap this at unverifiable.
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "pi streaming progress events must not poison parser health");
+    // The fixture emits tool_execution_update (real pi progress noise) - if
+    // the adapter mishandled it, it would have surfaced as an error event.
+    assert.ok(hasNoErrorEvents(eventsAfter, run.id), "pi streaming progress events must not produce error events");
     assert.equal(done.session_id, "019f0000-fake-7000-a000-000000000001");
     // Two turns at 0.001 each and (2000+1000)/(20+30) tokens - deltas must SUM.
     assert.ok(Math.abs(done.cost_usd - 0.002) < 1e-5, `cost_usd ${done.cost_usd} != ~0.002`);
@@ -398,7 +378,7 @@ describe("mission-control e2e (stub harness)", () => {
     );
   });
 
-  test("pi: harness-reported failure lands failed_verification with a HEALTHY parser", async () => {
+  test("pi: harness-reported failure lands failed with a clean parse", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
@@ -413,11 +393,14 @@ describe("mission-control e2e (stub harness)", () => {
     );
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "failed");
-    assert.equal(done.verdict, "failed_verification");
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "a cleanly parsed pi failure must not poison parser health");
     const err = eventsAfter(run.id, 0).find((e: any) => e.kind === "error" && (e.payload as any)?.note === "harness-error");
     assert.ok(err, "missing harness-error event for a failed pi run");
+    // A cleanly parsed harness failure is still a parse: no unparsed/unknown
+    // drift events alongside the expected harness-error.
+    const driftEvents = eventsAfter(run.id, 0).filter(
+      (e: any) => e.kind === "error" && (e.payload as any)?.note === "unknown-native-event",
+    );
+    assert.equal(driftEvents.length, 0, "a cleanly parsed pi failure must not also produce drift events");
   });
 
   test("pi: SOFTFAIL (errored terminal turn, process exit 0) is NOT a false green, even with an artifact present", async () => {
@@ -425,9 +408,8 @@ describe("mission-control e2e (stub harness)", () => {
     const { getRun } = await import("../src/core/db.ts");
 
     // pi's real shape (print-mode.js, `--mode json`): the process exits 0
-    // even when the final assistant message has stopReason "error". The old
-    // exit-code-only classification would call this `succeeded`, and with
-    // out.txt on disk, `verified`.
+    // even when the final assistant message has stopReason "error". A naive
+    // exit-code-only classification would call this `succeeded`.
     const run = launch(
       baseSpec({
         harness: "pi",
@@ -440,10 +422,6 @@ describe("mission-control e2e (stub harness)", () => {
     const done = await waitTerminal(() => getRun(run.id));
     assert.ok(existsSync(join(done.workdir, "out.txt")), "fixture must actually write the artifact");
     assert.equal(done.exit, "failed");
-    assert.notEqual(done.verdict, "verified");
-    assert.equal(done.verdict, "failed_verification");
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "a cleanly parsed error turn_end must not poison parser health");
   });
 
   test("pi: ABORTFAIL (stopReason aborted) fails the same way, and usage from the aborted turn is still recorded", async () => {
@@ -461,7 +439,6 @@ describe("mission-control e2e (stub harness)", () => {
     );
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "failed");
-    assert.notEqual(done.verdict, "verified");
     // The `usage` object is required on error/aborted terminal messages too -
     // dropping it would silently understate cost/tokens and starve --budget
     // enforcement on the run's way out.
@@ -470,9 +447,9 @@ describe("mission-control e2e (stub harness)", () => {
     assert.ok(done.cost_usd != null && Math.abs(done.cost_usd - 0.001) < 1e-6, `cost_usd ${done.cost_usd} != ~0.001`);
   });
 
-  test("pi: real-but-unmapped session events (compaction, auto-retry, queue) stay parser-healthy and reach verified", async () => {
+  test("pi: real-but-unmapped session events (compaction, auto-retry, queue) produce no error events and reach succeeded", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const run = launch(
       baseSpec({
@@ -485,9 +462,10 @@ describe("mission-control e2e (stub harness)", () => {
     );
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "verified");
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "queue_update/compaction_start/compaction_end/auto_retry_* must not poison parser health");
+    assert.ok(
+      hasNoErrorEvents(eventsAfter, run.id),
+      "queue_update/compaction_start/compaction_end/auto_retry_* must not produce error events",
+    );
   });
 
   test("pi: api_key mode refused with an honest rationale", async () => {
@@ -498,9 +476,9 @@ describe("mission-control e2e (stub harness)", () => {
     );
   });
 
-  test("kimi-code: verified run via gateway; session captured from the trailing resume_hint", async () => {
+  test("kimi-code: succeeded run via gateway; session captured from the trailing resume_hint", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const envDump = join(home, "kimi-env.json");
     const run = launch(
@@ -515,16 +493,14 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(run.cost_basis, "unavailable");
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "verified");
     // The stream has NO token/cost telemetry - null, never zero or invented.
     assert.equal(done.cost_usd, null);
     assert.equal(done.tokens_in, null);
     assert.equal(done.tokens_out, null);
     // session_id arrives only in the trailing resume_hint meta line, and the
-    // retry meta noise the fixture leads with must not poison parser health.
+    // retry meta noise the fixture leads with must not produce error events.
     assert.equal(done.session_id, "session_fake0000-f0a6-4d76-811d-35e6a1e7559e");
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "kimi meta noise must not poison parser health");
+    assert.ok(hasNoErrorEvents(eventsAfter, run.id), "kimi meta noise must not produce error events");
 
     // The gateway credential reaches the child ONLY as KIMI_MODEL_API_KEY (the
     // one env channel kimi reads); nothing else leaks.
@@ -539,7 +515,7 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(childEnv.HF_TOKEN, undefined);
   });
 
-  test("kimi-code: failed run (empty stdout, exit 1) lands failed + failed_verification", async () => {
+  test("kimi-code: failed run (empty stdout, exit 1) lands failed", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun } = await import("../src/core/db.ts");
 
@@ -554,7 +530,6 @@ describe("mission-control e2e (stub harness)", () => {
     );
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "failed");
-    assert.equal(done.verdict, "failed_verification");
 
     // Empty stdout means no harness-error event - the supervisor synthesizes
     // the reason from the scrubbed stderr tail so the failure is not silent.
@@ -634,9 +609,9 @@ describe("mission-control e2e (stub harness)", () => {
     );
   });
 
-  test("opencode: verified gateway run; metered per-step cost and tokens ACCUMULATE", async () => {
+  test("opencode: succeeded gateway run; metered per-step cost and tokens ACCUMULATE", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const envDump = join(home, "opencode-env.json");
     const run = launch(
@@ -653,14 +628,12 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(run.cost_basis, "metered_reported");
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "verified");
     assert.equal(done.session_id, "ses_fake05772ffeXi7yksg5cygHR7");
     // Two steps: 6477+621 in, 76+27 out, 0.0216654+0.0055986 dollars - deltas SUM.
     assert.equal(done.tokens_in, 7098);
     assert.equal(done.tokens_out, 103);
     assert.ok(Math.abs(done.cost_usd - 0.027264) < 1e-6, `cost_usd ${done.cost_usd} != ~0.027264`);
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "step_start noise must not poison parser health");
+    assert.ok(hasNoErrorEvents(eventsAfter, run.id), "step_start noise must not produce error events");
 
     // Full XDG isolation + exactly one credential, delivered under the name
     // opencode actually reads (OPENROUTER_API_KEY); nothing else leaks.
@@ -674,9 +647,9 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(childEnv.HF_TOKEN, undefined);
   });
 
-  test("opencode: mid-stream FAIL lands failed_verification with a HEALTHY parser", async () => {
+  test("opencode: mid-stream FAIL lands failed with a clean parse", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const run = launch(
       baseSpec({
@@ -689,9 +662,10 @@ describe("mission-control e2e (stub harness)", () => {
     );
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "failed");
-    assert.equal(done.verdict, "failed_verification");
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "a cleanly parsed error envelope must not poison parser health");
+    const driftEvents = eventsAfter(run.id, 0).filter(
+      (e: any) => e.kind === "error" && (e.payload as any)?.note === "unknown-native-event",
+    );
+    assert.equal(driftEvents.length, 0, "a cleanly parsed error envelope must not also produce drift events");
   });
 
   test("opencode: native resume via -s continues the same session", async () => {
@@ -940,31 +914,6 @@ describe("mission-control e2e (stub harness)", () => {
     assert.throws(() => launch(baseSpec({ artifacts: ["sub/.."] }) as never), /escapes the run workdir/);
   });
 
-  test("a directory at the declared artifact path fails verification, not verified", async () => {
-    const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
-
-    // The old check was `exists && size > 0`; an ordinary directory (~4096
-    // bytes) satisfied that just as well as a real deliverable. Directive
-    // MKDIRARTIFACT tells the fake harness to `mkdir` the declared path
-    // instead of writing a file to it.
-    const run = launch(
-      baseSpec({
-        harness: "codex",
-        prompt: "make a directory instead of a file MKDIRARTIFACT",
-        artifacts: ["out.txt"],
-        auth: { mode: "api_key" },
-      }) as never,
-    );
-    const done = await waitTerminal(() => getRun(run.id));
-    assert.equal(done.verdict, "failed_verification");
-    assert.notEqual(done.verdict, "verified");
-    const artifactCheck = JSON.parse(done.verify_evidence).find((c: any) => c.name === "artifact:out.txt");
-    assert.ok(artifactCheck, "missing artifact:out.txt check");
-    assert.equal(artifactCheck.passed, false);
-    assert.ok(artifactCheck.detail.includes("not a regular file"), artifactCheck.detail);
-  });
-
   test("preflight refuses invalid cap values", async () => {
     const { launch } = await import("../src/core/launch.ts");
     assert.throws(() => launch(baseSpec({ max_minutes: -5 }) as never), /finite positive/);
@@ -981,71 +930,43 @@ describe("mission-control e2e (stub harness)", () => {
     }
   });
 
-  test("unreadable native stream caps the verdict at unverifiable (parser health)", async () => {
+  test("codex: harness-reported failure lands failed with a clean parse", async () => {
     const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
-
-    const run = launch(baseSpec({ prompt: "drift simulation RAWLINES", artifacts: ["out.txt"] }) as never);
-    const done = await waitTerminal(() => getRun(run.id));
-    // Artifact exists and exit is 0, but mc was blind - never verified.
-    assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "unverifiable");
-    assert.ok(done.verify_evidence.includes("parser_health"));
-  });
-
-  test("git_effect: committed clean-tree work reaches verified", async () => {
-    const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
-
-    const repo = mkdtempSync(join(tmpdir(), "mc-gitcommit-"));
-    try {
-      spawnSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
-      writeFileSync(join(repo, "README.md"), "seed\n");
-      spawnSync("sh", ["-c", `git -C ${repo} add -A && git -C ${repo} -c user.email=t@t -c user.name=t commit -q -m seed`], { stdio: "ignore" });
-
-      const run = launch(baseSpec({ prompt: "do the work and commit it GITCOMMIT", cwd: repo }) as never);
-      const done = await waitTerminal(() => getRun(run.id));
-      // Tree is CLEAN (the agent committed) - old dirty-tree check failed this.
-      assert.equal(done.exit, "succeeded");
-      assert.equal(done.verdict, "verified");
-      const gitCheck = JSON.parse(done.verify_evidence).find((c: any) => c.name === "git_effect");
-      assert.ok(gitCheck.passed, `git_effect failed: ${gitCheck.detail}`);
-      assert.ok(gitCheck.detail.includes("1 commit(s)"), gitCheck.detail);
-    } finally {
-      rmSync(repo, { recursive: true, force: true });
-    }
-  });
-
-  test("codex: harness-reported failure lands failed_verification with a HEALTHY parser", async () => {
-    const { launch } = await import("../src/core/launch.ts");
-    const { getRun } = await import("../src/core/db.ts");
+    const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     const run = launch(
       baseSpec({ harness: "codex", prompt: "fail on purpose FAIL", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
     );
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "failed");
-    assert.equal(done.verdict, "failed_verification"); // an honest failure, not blindness
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "cleanly parsed harness errors must not poison parser health");
+    const driftEvents = eventsAfter(run.id, 0).filter(
+      (e: any) => e.kind === "error" && (e.payload as any)?.note === "unknown-native-event",
+    );
+    assert.equal(driftEvents.length, 0, "cleanly parsed harness errors must not also produce drift events");
   });
 
-  test("codex: mcp_tool_call and web_search items don't poison parser health, and the tool name/result are captured", async () => {
+  test("codex: mcp_tool_call and web_search items don't produce error events, and the tool name/result are captured", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun, eventsAfter } = await import("../src/core/db.ts");
 
     // Real codex exec-item types (confirmed against the installed codex-cli
     // 0.145.0 binary's item-type enum) that previously had no branch and fell
-    // to the `else` -> unknown-native-event -> capped the verdict at
-    // unverifiable on any run that used an MCP tool or web search.
+    // to the `else` -> unknown-native-event on any run that used an MCP tool
+    // or web search.
     const run = launch(
       baseSpec({ harness: "codex", prompt: "produce out.txt MCPTOOLS", artifacts: ["out.txt"], auth: { mode: "api_key" } }) as never,
     );
     const done = await waitTerminal(() => getRun(run.id));
     assert.equal(done.exit, "succeeded");
-    assert.equal(done.verdict, "verified");
-    const health = JSON.parse(done.verify_evidence).find((c: any) => c.name === "parser_health");
-    assert.ok(health.passed, "mcp_tool_call/web_search items must not poison parser health");
+    // Codex may also emit its own benign harness-error diagnostics (e.g. a
+    // model-metadata fallback notice) on a run that legitimately succeeds -
+    // those are expected and must not gate anything. What must NOT appear is
+    // parser drift: mcp_tool_call/web_search previously had no branch and
+    // fell to unknown-native-event.
+    const driftEvents = eventsAfter(run.id, 0).filter(
+      (e: any) => e.kind === "error" && (e.payload as any)?.note === "unknown-native-event",
+    );
+    assert.equal(driftEvents.length, 0, "mcp_tool_call/web_search items must not produce drift events");
 
     // The ThreadItem binding carries `server` and `tool` as separate fields -
     // the tool_call event must be keyed on `tool` (the actual tool name), not
@@ -1098,7 +1019,7 @@ describe("mission-control e2e (stub harness)", () => {
     assert.notEqual(done.exit, "succeeded");
   });
 
-  test("CLI resume inherits artifacts/visual/caps from the parent; flags override", async () => {
+  test("CLI resume inherits artifacts/caps from the parent; flags override", async () => {
     const { launch } = await import("../src/core/launch.ts");
     const { getRun, findRun } = await import("../src/core/db.ts");
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
@@ -1134,8 +1055,7 @@ describe("mission-control e2e (stub harness)", () => {
     });
     assert.equal(res2.status, 0, res2.stderr);
     const child2 = await waitTerminal(() => findRun(res2.stdout.trim().split(/\s+/)[0]!));
-    assert.deepEqual(child2.artifacts, ["other.txt"]);
-    assert.equal(child2.verdict, "failed_verification"); // other.txt never produced - override really applied
+    assert.deepEqual(child2.artifacts, ["other.txt"]); // the override really applied, not just accepted and ignored
   });
 
   test("resume --fresh: checkpoint restart in a NEW worktree with a NEW session", async () => {
@@ -1153,7 +1073,7 @@ describe("mission-control e2e (stub harness)", () => {
         baseSpec({ prompt: "do the work and commit it GITCOMMIT", cwd: repo, artifacts: ["out.txt"] }) as never,
       );
       const parent = await waitTerminal(() => getRun(parentRun.id));
-      assert.equal(parent.verdict, "verified");
+      assert.equal(parent.exit, "succeeded");
       const parentHead = spawnSync("git", ["-C", parent.workdir, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
 
       const res = spawnSync(process.execPath, [entry, "resume", parent.id, "--fresh", "start over from the checkpoint"], {
@@ -1170,7 +1090,6 @@ describe("mission-control e2e (stub harness)", () => {
       const childSpec = JSON.parse(readFileSync(child.spec_path, "utf8"));
       assert.equal(childSpec.resume_session_id, undefined); // NEW session by design
       assert.equal(childSpec.checkpoint, parentHead); // anchored at the parent's HEAD
-      assert.equal(childSpec.git_head_at_launch, parentHead);
 
       // --at with a non-commit is refused at preflight.
       const bad = spawnSync(process.execPath, [entry, "resume", parent.id, "--fresh", "--at", "deadbeef", "x"], {
@@ -1192,12 +1111,12 @@ describe("mission-control e2e (stub harness)", () => {
     insertRun({
       id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
       host: "test", prompt: "orphaned run", title: "orphaned run", spec_path: join(home, "none.json"),
-      workdir: join(home, "none"), session_id: null, exit: "running", verdict: "pending",
+      workdir: join(home, "none"), session_id: null, exit: "running",
       started_at: new Date(Date.now() - 60_000).toISOString(), ended_at: null,
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: null, supervisor_pid: 999_999_999, stderr_path: join(home, "none.log"),
-      artifacts: [], verify_evidence: null, notified: false,
+      artifacts: [], notified: false,
     } as never);
 
     const res = spawnSync(process.execPath, [entry, "reap"], { encoding: "utf8", env: { ...process.env } });
@@ -1256,7 +1175,7 @@ describe("mission-control e2e (stub harness)", () => {
     insertRun({
       id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
       host: "test", prompt: "orphaned harness", title: "orphaned harness", spec_path: join(home, "lost-none.json"),
-      workdir, session_id: null, exit: "lost", verdict: "pending",
+      workdir, session_id: null, exit: "lost",
       started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
@@ -1265,7 +1184,7 @@ describe("mission-control e2e (stub harness)", () => {
       // exit: "lost" directly simulates) would already have had its
       // notification delivered by the reap that marked it lost; leaving this
       // false would make an unrelated `mc reap` sweep it and double-fire hooks.
-      artifacts: [], verify_evidence: null, notified: true,
+      artifacts: [], notified: true,
     } as never);
     // The ownership check (start-time identity) needs a recorded `pid_start`
     // to compare against - this is what supervisor.ts writes at real spawn
@@ -1273,7 +1192,6 @@ describe("mission-control e2e (stub harness)", () => {
     insertEvent(id, "status_change", {
       exit: "running", pid: orphan.pid, supervisor_pid: 999_999_998, pid_start: psLstart(orphan.pid!),
     });
-
     assert.ok(pidAlive(orphan.pid), "sanity: orphan must be alive before mc kill runs");
 
     // Async, not spawnSync: this test is itself the orphan's parent, and a
@@ -1314,12 +1232,12 @@ describe("mission-control e2e (stub harness)", () => {
     insertRun({
       id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
       host: "test", prompt: "stale lost row", title: "stale lost row", spec_path: join(home, "reuse-none.json"),
-      workdir: join(home, "reuse-none-workdir"), session_id: null, exit: "lost", verdict: "pending",
+      workdir: join(home, "reuse-none-workdir"), session_id: null, exit: "lost",
       started_at: new Date(Date.now() - 3_600_000).toISOString(), ended_at: new Date().toISOString(),
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: stranger.pid, supervisor_pid: 999_999_994, stderr_path: join(home, "reuse-none.log"),
-      artifacts: [], verify_evidence: null, notified: true,
+      artifacts: [], notified: true,
     } as never);
     // The recorded start time is from "the original harness" this pid used
     // to belong to - deliberately NOT the stand-in process's real start
@@ -1376,12 +1294,12 @@ describe("mission-control e2e (stub harness)", () => {
       id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
       host: "test", prompt: "non-grouped, SIGTERM-ignoring harness", title: "non-grouped harness",
       spec_path: join(home, "bare-none.json"), workdir: join(home, "bare-none"), session_id: null,
-      exit: "lost", verdict: "pending",
+      exit: "lost",
       started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: stubborn.pid, supervisor_pid: 999_999_993, stderr_path: join(home, "bare-none.log"),
-      artifacts: [], verify_evidence: null, notified: true,
+      artifacts: [], notified: true,
     } as never);
     insertEvent(id, "status_change", {
       exit: "running", pid: stubborn.pid, supervisor_pid: 999_999_993, pid_start: psLstart(stubborn.pid!),
@@ -1409,12 +1327,12 @@ describe("mission-control e2e (stub harness)", () => {
     insertRun({
       id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
       host: "test", prompt: "long dead", title: "long dead", spec_path: join(home, "dead-none.json"),
-      workdir: join(home, "dead-none"), session_id: null, exit: "lost", verdict: "pending",
+      workdir: join(home, "dead-none"), session_id: null, exit: "lost",
       started_at: new Date(Date.now() - 120_000).toISOString(), ended_at: new Date().toISOString(),
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key", gateway: null,
       pid: 999_999_997, supervisor_pid: 999_999_996, stderr_path: join(home, "dead-none.log"),
-      artifacts: [], verify_evidence: null, notified: true,
+      artifacts: [], notified: true,
     } as never);
     assert.ok(!pidAlive(999_999_997), "sanity: this pid must not actually exist");
 
@@ -1446,12 +1364,12 @@ describe("mission-control e2e (stub harness)", () => {
     return {
       id, parent_run_id: null, root_run_id: id, harness: "claude-code", model: null,
       host: "test", prompt: "placeholder", title: "placeholder", spec_path: join(home, `${id}.json`),
-      workdir: join(home, id), session_id: null, exit: "succeeded", verdict: "verified",
+      workdir: join(home, id), session_id: null, exit: "succeeded",
       started_at: new Date().toISOString(), ended_at: new Date().toISOString(),
       cost_usd: null, cost_basis: "unavailable", tokens_in: null, tokens_out: null,
       budget_usd: null, max_minutes: null, auth_mode: "api_key" as const, gateway: null,
       pid: null, supervisor_pid: null, stderr_path: join(home, `${id}.log`),
-      artifacts: [], verify_evidence: null, notified: false,
+      artifacts: [], notified: false,
       ...overrides,
     };
   }
@@ -1499,7 +1417,6 @@ describe("mission-control e2e (stub harness)", () => {
       placeholderRun(bareId, {
         ended_at: null,
         exit: "running",
-        verdict: "pending",
         pid: process.pid,
         supervisor_pid: process.pid,
         notified: true,
@@ -1509,7 +1426,7 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(lsBare.status, 0, lsBare.stderr);
     const bareLine = lsBare.stdout.split("\n").find((l) => l.includes(bareId));
     assert.ok(bareLine, lsBare.stdout);
-    assert.match(bareLine!, /running\s+pending\s+-\s+-\s+-\s+\d+s\s*$/); // COST/TOKENS/DURATION all "-", AGE last
+    assert.match(bareLine!, /running\s+-\s+-\s+-\s+\d+s\s*$/); // COST/TOKENS/DURATION all "-", AGE last
   });
 
   test("notify hook that never reads stdin does not crash mc reap; read commands stay side-effect free", async () => {
@@ -1584,7 +1501,7 @@ describe("mission-control e2e (stub harness)", () => {
     const id = "tail001";
     // Already terminal at insert time - `mc tail` should hit its
     // break condition on the very first poll if it isn't looping.
-    insertRun(placeholderRun(id, { exit: "failed", verdict: "failed_verification", notified: false }) as never);
+    insertRun(placeholderRun(id, { exit: "failed", notified: false }) as never);
 
     try {
       // Drains stdin cleanly (no EPIPE noise here) and always fails delivery.
@@ -1675,7 +1592,7 @@ describe("mission-control e2e (stub harness)", () => {
     const counterPath = join(home, "retry-counter.txt");
 
     const id = "retry01";
-    insertRun(placeholderRun(id, { exit: "failed", verdict: "failed_verification", notified: false }) as never);
+    insertRun(placeholderRun(id, { exit: "failed", notified: false }) as never);
 
     try {
       // Drains stdin (no EPIPE noise here - that's the other test's concern),
