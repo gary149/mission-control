@@ -23,6 +23,42 @@ function requireRun(idOrPrefix) {
         fail(`no run matches "${idOrPrefix}"`);
     return run;
 }
+// Every exit value, compile-checked for exhaustiveness against the union in
+// types.ts: adding a member there without updating here fails to typecheck.
+const EXIT_VALUES = Object.keys({
+    queued: 1, running: 1, succeeded: 1, failed: 1, killed: 1, lost: 1,
+});
+/**
+ * Comma-separated, repeatable value filter for `mc ls --exit`. Unknown values
+ * fail loudly with the valid set - a typo that silently matched nothing would
+ * read as "no runs in that state". A supplied flag whose tokens are all empty
+ * (`--exit ','`, or automation interpolating an empty variable) must not
+ * degrade to "no filter" either: that returns the full unfiltered ledger with
+ * exit 0, the worst case for an automated consumer expecting filtered output.
+ */
+function parseExitFilter(args) {
+    const values = [];
+    let seen = false;
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] !== "--exit")
+            continue;
+        seen = true;
+        const next = args[i + 1];
+        if (!next || next.startsWith("--"))
+            fail(`--exit requires a value (${EXIT_VALUES.join(", ")})`);
+        values.push(...next.split(",").map((v) => v.trim()).filter(Boolean));
+        i++;
+    }
+    if (!seen)
+        return null;
+    if (values.length === 0)
+        fail(`--exit requires a value (${EXIT_VALUES.join(", ")})`);
+    for (const v of values) {
+        if (!EXIT_VALUES.includes(v))
+            fail(`unknown --exit value "${v}" (valid: ${EXIT_VALUES.join(", ")})`);
+    }
+    return new Set(values);
+}
 function pidAlive(pid) {
     if (!pid)
         return false;
@@ -477,7 +513,9 @@ COMMANDS
                 --max-minutes, --max-idle-minutes, --budget
   reap          Cron-safe: mark dead-supervisor runs lost, deliver pending
                 notifications (e.g. */10 * * * * mc reap)
-  ls            List runs; also reaps lost runs and re-delivers missed notifications
+  ls            List runs; also reaps lost runs and re-delivers missed notifications.
+                --exit filters by state, comma-separated
+                (e.g. --exit running  |  --exit failed,killed,lost)
   show <id>     Full run record, recent events
   tail <id>     Follow a run's event stream until it terminates
   kill <id>     Request termination (state lands when the process actually dies)
@@ -558,9 +596,29 @@ export async function cliMain(argv) {
                 break;
             }
             case "ls": {
+                // ls takes exactly --json and --exit; anything else fails loudly.
+                // Skipping unknown tokens would turn a misspelled `--exiit running`
+                // into an unfiltered SUCCESSFUL response - the worst case for an
+                // automated consumer expecting filtered output.
+                for (let i = 0; i < args.length; i++) {
+                    const arg = args[i];
+                    if (arg === "--json")
+                        continue;
+                    if (arg === "--exit") {
+                        i++; // the flag's value; parseExitFilter validates it
+                        continue;
+                    }
+                    fail(`unknown ls argument "${arg}" (valid: --exit, --json)`);
+                }
+                const exitFilter = parseExitFilter(args);
                 // Read command: detect lost runs, but never dispatch/retry delivery
-                // (that's `mc reap`'s job) - see reapLostRuns's doc comment.
-                const runs = await reapLostRuns(listRuns(), false);
+                // (that's `mc reap`'s job) - see reapLostRuns's doc comment. The
+                // filter applies AFTER the reap pass so it selects on each run's
+                // current truth: a stale `running` row that just got reaped shows up
+                // under `--exit lost`, not under the state it no longer occupies.
+                let runs = await reapLostRuns(listRuns(), false);
+                if (exitFilter)
+                    runs = runs.filter((r) => exitFilter.has(r.exit));
                 if (args.includes("--json")) {
                     console.log(JSON.stringify(runs, null, 2));
                     break;
