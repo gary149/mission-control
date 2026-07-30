@@ -208,12 +208,15 @@ export async function notifyTerminal(run: Run, config: McConfig): Promise<void> 
  * completion pushes never has to filter out assessment noise, and vice
  * versa.
  *
- * Delivery truth lives on the assessment ROW's own `notified` flag (mirrors
- * `notified` on runs; see db.ts's claimAssessmentNotify /
- * setAssessmentNotified), with the identical stdin-fully-read/exit-0
- * semantics as notifyTerminal - both go through the same `dispatch` above.
- * `mc reap` retries any assessment still `notified = 0` the same way it
- * retries failed run notifications.
+ * Delivery truth lives in db.ts's separate `assessment_notifications` table
+ * (keyed run_id + assessment seq), NOT a `notified` column on the assessment
+ * row itself - see that table's comment for why: a mutable delivery flag on
+ * `assessments` would UPDATE a judgment row in place on every claim/release,
+ * which would make that table not genuinely append-only. claimAssessmentNotify
+ * / setAssessmentNotified are the only things that ever touch it, with the
+ * identical stdin-fully-read/exit-0 semantics as notifyTerminal - both go
+ * through the same `dispatch` above. `mc reap` retries any assessment still
+ * undelivered the same way it retries failed run notifications.
  */
 export async function notifyAssessment(run: Run, assessment: Assessment, config: McConfig): Promise<void> {
   if (!claimAssessmentNotify(run.id, assessment.seq)) return;

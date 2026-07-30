@@ -2140,19 +2140,177 @@ describe("mission-control e2e (stub harness)", () => {
     }
   });
 
+  test("mc assess: a whitespace-only --by is rejected exactly like a missing one, and non-blank values are trimmed", async () => {
+    const { insertRun, assessmentsFor } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "byws0001";
+    insertRun(placeholderRun(id, { exit: "succeeded", notified: true }) as never);
+
+    // A whitespace-only value passes a naive falsiness check (it's a
+    // non-empty string) - it must be trimmed and rejected as if --by had
+    // been omitted entirely, not accepted as a "reviewer" named "   ".
+    const blank = spawnSync(process.execPath, [entry, "assess", id, "--by", "   ", "--disposition", "accepted"], {
+      encoding: "utf8", env: { ...process.env },
+    });
+    assert.equal(blank.status, 1);
+    assert.match(blank.stderr, /--by is required/);
+    assert.equal(assessmentsFor(id).length, 0, "a rejected whitespace-only --by must not have appended a row");
+
+    // A value with incidental surrounding whitespace is trimmed, not refused.
+    const padded = spawnSync(process.execPath, [entry, "assess", id, "--by", "  alice  ", "--disposition", "accepted"], {
+      encoding: "utf8", env: { ...process.env },
+    });
+    assert.equal(padded.status, 0, padded.stderr);
+    assert.equal(JSON.parse(padded.stdout).reviewer, "alice");
+  });
+
+  test("assessments schema: CHECK constraints enforce structure (non-blank reviewer, a real disposition) as defense in depth below the CLI", async () => {
+    const { insertAssessment } = await import("../src/core/db.ts");
+
+    // These bypass cli.ts's own validation entirely, exercising the SQLite
+    // CHECK constraints directly - the point of settling the schema now
+    // (before real fleets have durable rows) is that these constraints are
+    // load-bearing even if some future caller forgets the CLI-level check.
+    assert.throws(
+      () =>
+        insertAssessment("nonexistent-run-check-1", {
+          reviewer: "   ",
+          disposition: "accepted",
+          checkpoint_sha: null,
+          evidence: [],
+          note: null,
+          observed: null,
+        }),
+      /constraint/i,
+    );
+    assert.throws(
+      () =>
+        insertAssessment("nonexistent-run-check-2", {
+          reviewer: "alice",
+          disposition: "maybe",
+          checkpoint_sha: null,
+          evidence: [],
+          note: null,
+          observed: null,
+        }),
+      /constraint/i,
+    );
+  });
+
+  test("assessments table is genuinely append-only at the schema level: delivery state lives in a separate table, never a column on assessments", async () => {
+    const { openDb, insertRun, assessmentsFor } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    // Schema-level proof, not just behavioral: `assessments` itself must
+    // have no delivery-state column at all - PRAGMA table_info is the
+    // ground truth for what columns actually exist, independent of what any
+    // TS type claims.
+    const assessmentColumns = (openDb().prepare("PRAGMA table_info(assessments)").all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    assert.ok(!assessmentColumns.includes("notified"), `assessments must not have a notified column, got: ${assessmentColumns}`);
+    const notificationColumns = (
+      openDb().prepare("PRAGMA table_info(assessment_notifications)").all() as { name: string }[]
+    ).map((c) => c.name);
+    assert.ok(notificationColumns.includes("run_id") && notificationColumns.includes("assessment_seq") && notificationColumns.includes("notified"));
+
+    // Behavioral corollary: recording and then delivering an assessment's
+    // notification never changes anything about the assessment row itself
+    // (ts, reviewer, disposition, ...) - only its joined-in `notified` flips,
+    // and that flip is physically a row in the other table.
+    const id = "immut001";
+    insertRun(placeholderRun(id, { exit: "succeeded", notified: true }) as never);
+    const configPath = join(home, "config.toml");
+    const original = readFileSync(configPath, "utf8");
+    try {
+      writeFileSync(configPath, "# no hooks - nothing configured\n");
+      const res = spawnSync(process.execPath, [entry, "assess", id, "--by", "henry", "--disposition", "retry"], {
+        encoding: "utf8", env: { ...process.env },
+      });
+      assert.equal(res.status, 0, res.stderr);
+      const before = assessmentsFor(id)[0]!;
+      assert.equal(before.notified, true); // nothing configured -> obligation discharged immediately
+
+      // Force the delivery flag to flip back and forth via the same code
+      // path notify.ts uses, and confirm every OTHER field is byte-identical.
+      const { setAssessmentNotified } = await import("../src/core/db.ts");
+      setAssessmentNotified(id, before.seq, false);
+      setAssessmentNotified(id, before.seq, true);
+      const after = assessmentsFor(id)[0]!;
+      assert.deepEqual(
+        { ...before, notified: undefined },
+        { ...after, notified: undefined },
+        "every field but the joined-in delivery flag must be unchanged",
+      );
+    } finally {
+      writeFileSync(configPath, original);
+    }
+  });
+
+  test("mc show <id> --json: {run, assessments, events} as machine-readable JSON, assessments carrying evidence/checkpoint/delivery state, events NOT truncated to last-10", async () => {
+    const { insertRun, insertEvent } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const id = "showjson";
+    insertRun(placeholderRun(id, { exit: "succeeded", notified: true }) as never);
+    // More than the human form's last-10 window, so --json returning all of
+    // them is actually a distinguishing assertion, not a coincidence.
+    for (let i = 0; i < 15; i++) insertEvent(id, "text", { i });
+
+    const evidencePath = join(home, "showjson-evidence.txt");
+    writeFileSync(evidencePath, "evidence content\n");
+    const assess = spawnSync(
+      process.execPath,
+      [entry, "assess", id, "--by", "iris", "--disposition", "accepted", "--evidence", evidencePath],
+      { encoding: "utf8", env: { ...process.env } },
+    );
+    assert.equal(assess.status, 0, assess.stderr);
+
+    const show = spawnSync(process.execPath, [entry, "show", id, "--json"], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(show.status, 0, show.stderr);
+    const parsed = JSON.parse(show.stdout);
+
+    assert.equal(parsed.run.id, id);
+    assert.equal(parsed.assessments.length, 1);
+    const a = parsed.assessments[0];
+    assert.equal(a.reviewer, "iris");
+    assert.equal(a.disposition, "accepted");
+    assert.equal(a.evidence.length, 1);
+    assert.equal(a.evidence[0].path, evidencePath);
+    assert.equal(a.evidence[0].sha256, createHash("sha256").update("evidence content\n").digest("hex"));
+    assert.equal(typeof a.notified, "boolean"); // delivery state present, not omitted
+
+    // The FULL event stream, not the human form's abbreviated last-10.
+    assert.ok(parsed.events.length >= 15, `expected >=15 events, got ${parsed.events.length}`);
+
+    // The human form still prints prose + an abbreviated event window - this
+    // command didn't regress into JSON-only.
+    const humanShow = spawnSync(process.execPath, [entry, "show", id], { encoding: "utf8", env: { ...process.env } });
+    assert.equal(humanShow.status, 0, humanShow.stderr);
+    assert.ok(humanShow.stdout.includes("last events:"), humanShow.stdout);
+    assert.ok(humanShow.stdout.includes("assessments:"), humanShow.stdout);
+  });
+
   test("mc init: writes [notify]/[notify.assessment] idempotently (byte-identical on a second run) and reports synthetic verification", async () => {
     const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
     const initHome = mkdtempSync(join(tmpdir(), "mc-init-"));
     try {
-      const hookOut = join(initHome, "hook-out.json");
+      // Both hooks are real and drain stdin cleanly, so both verify OK - this
+      // test is about idempotency and exit 0 on a genuinely healthy setup;
+      // the "a failed verification exits nonzero" case is its own test below
+      // (mixing the two here would make this one non-deterministic about
+      // which exit code to expect).
+      const notifyOut = join(initHome, "notify-out.json");
+      const assessmentOut = join(initHome, "assessment-out.json");
       const env = { ...process.env, MC_HOME: initHome };
       const runInit = () =>
         spawnSync(
           process.execPath,
           [
             entry, "init",
-            "--notify-exec", `cat > ${hookOut}`,
-            "--assessment-webhook", "https://example.invalid/assessment-hook",
+            "--notify-exec", `cat > ${notifyOut}`,
+            "--assessment-exec", `cat > ${assessmentOut}`,
           ],
           { encoding: "utf8", env },
         );
@@ -2160,13 +2318,12 @@ describe("mission-control e2e (stub harness)", () => {
       const first = runInit();
       assert.equal(first.status, 0, first.stderr);
       assert.ok(first.stdout.includes("wrote"), first.stdout);
-      // The exec hook is real and drains stdin cleanly -> verification succeeds.
       assert.ok(first.stdout.includes("[notify] verification: OK (delivered)"), first.stdout);
-      // example.invalid never resolves -> verification honestly reports failure.
-      assert.ok(first.stdout.includes("[notify.assessment] verification: FAILED"), first.stdout);
-      const verifyPayload = JSON.parse(readFileSync(hookOut, "utf8"));
+      assert.ok(first.stdout.includes("[notify.assessment] verification: OK (delivered)"), first.stdout);
+      const verifyPayload = JSON.parse(readFileSync(notifyOut, "utf8"));
       assert.equal(verifyPayload.test, true);
       assert.equal(verifyPayload.note, "mc init verification");
+      assert.equal(JSON.parse(readFileSync(assessmentOut, "utf8")).test, true);
 
       const configPath = join(initHome, "config.toml");
       const afterFirst = readFileSync(configPath, "utf8");
@@ -2177,6 +2334,43 @@ describe("mission-control e2e (stub harness)", () => {
       assert.equal(second.status, 0, second.stderr);
       const afterSecond = readFileSync(configPath, "utf8");
       assert.equal(afterSecond, afterFirst, "re-running mc init with the same flags must be byte-identical");
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init: a failed requested verification still writes config and reports every result, but exits nonzero", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-failverify-"));
+    try {
+      const hookOut = join(initHome, "hook-out.json");
+      const env = { ...process.env, MC_HOME: initHome };
+
+      const res = spawnSync(
+        process.execPath,
+        [
+          entry, "init",
+          "--notify-exec", `cat > ${hookOut}`,
+          // example.invalid never resolves - a genuine, deterministic verification failure.
+          "--assessment-webhook", "https://example.invalid/assessment-hook",
+        ],
+        { encoding: "utf8", env },
+      );
+
+      // The exact false-green `mc init` exists to eliminate: a requested hook
+      // that doesn't actually work must make the PROCESS fail, not just print
+      // "FAILED" and exit 0 for a script to miss.
+      assert.equal(res.status, 1, res.stdout + res.stderr);
+      assert.ok(res.stdout.includes("[notify] verification: OK (delivered)"), res.stdout);
+      assert.ok(res.stdout.includes("[notify.assessment] verification: FAILED"), res.stdout);
+
+      // Config.toml is still written despite the failed verification - init
+      // separates "did I persist the config" from "did every hook verify".
+      const configPath = join(initHome, "config.toml");
+      assert.ok(existsSync(configPath), "config.toml must still be written even when a verification fails");
+      const written = readFileSync(configPath, "utf8");
+      assert.ok(written.includes("[notify]"));
+      assert.ok(written.includes("[notify.assessment]"));
     } finally {
       rmSync(initHome, { recursive: true, force: true });
     }
@@ -2216,7 +2410,12 @@ describe("mission-control e2e (stub harness)", () => {
         [entry, "init", "--notify-exec", join(initHome, "definitely-does-not-exist.sh")],
         { encoding: "utf8", env },
       );
-      assert.equal(write.status, 0, write.stderr); // init itself always writes+reports; never fails the process
+      // The hook doesn't exist, so its synthetic verification fails - `mc
+      // init` still writes config.toml (checked below) but now exits nonzero
+      // for the requested-verification failure itself (fix: it used to print
+      // FAILED and exit 0, the exact false-green this command exists to catch).
+      assert.equal(write.status, 1, write.stdout + write.stderr);
+      assert.ok(write.stdout.includes("verification: FAILED"), write.stdout);
 
       const configPath = join(initHome, "config.toml");
       const before = readFileSync(configPath, "utf8");
@@ -2255,9 +2454,14 @@ describe("mission-control e2e (stub harness)", () => {
       // never touch whoever's actual crontab happens to run the suite.
       // Supports exactly the two invocations mc's init uses: `-l` (list) and
       // `-` (replace from stdin) - the same interface `crontab -e` users see.
+      // Critically, the "no crontab yet" case emits the SAME stderr message
+      // real crontab implementations do ("no crontab for ...") - mc's
+      // readCrontab only treats that specific, positively-identified message
+      // as genuinely empty (see the fail-closed test below for what happens
+      // when this message is ABSENT on a failure).
       writeFileSync(
         join(stubDir, "crontab"),
-        `#!/bin/sh\nif [ "$1" = "-l" ]; then [ -f "${store}" ] && cat "${store}" || exit 1; elif [ "$1" = "-" ]; then cat > "${store}"; else exit 1; fi\n`,
+        `#!/bin/sh\nif [ "$1" = "-l" ]; then [ -f "${store}" ] && cat "${store}" || { echo "crontab: no crontab for $(whoami)" >&2; exit 1; }; elif [ "$1" = "-" ]; then cat > "${store}"; else exit 1; fi\n`,
       );
       chmodSync(join(stubDir, "crontab"), 0o755);
 
@@ -2282,6 +2486,42 @@ describe("mission-control e2e (stub harness)", () => {
       // `mc init --check` picks up the same stubbed crontab and reports presence.
       const check = spawnSync(process.execPath, [entry, "init", "--check"], { encoding: "utf8", env });
       assert.ok(check.stdout.includes("crontab reap entry: present"), check.stdout);
+    } finally {
+      rmSync(initHome, { recursive: true, force: true });
+      rmSync(stubDir, { recursive: true, force: true });
+    }
+  });
+
+  test("mc init --install-reap: a crontab read failure that ISN'T positively 'no crontab' aborts the install rather than risk replacing a real crontab", async () => {
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+    const initHome = mkdtempSync(join(tmpdir(), "mc-init-cron-fail-"));
+    const stubDir = mkdtempSync(join(tmpdir(), "mc-crontab-stub-fail-"));
+    try {
+      const store = join(initHome, "fake-crontab.txt");
+      const writeAttempted = join(initHome, "write-attempted.marker");
+      // `-l` always fails with a GENERIC error (permission denied, transient
+      // disk hiccup, whatever) - no "no crontab for" message anywhere. This
+      // must NOT be read as "empty crontab, safe to overwrite": that
+      // conflation is exactly what would let `crontab -` below replace
+      // whatever the user's real crontab actually holds. The `-` branch
+      // writing a marker lets the test prove it was never even attempted.
+      writeFileSync(
+        join(stubDir, "crontab"),
+        `#!/bin/sh\nif [ "$1" = "-l" ]; then echo "crontab: temporary failure" >&2; exit 1; elif [ "$1" = "-" ]; then touch "${writeAttempted}"; cat > "${store}"; else exit 1; fi\n`,
+      );
+      chmodSync(join(stubDir, "crontab"), 0o755);
+
+      const env = { ...process.env, MC_HOME: initHome, PATH: `${stubDir}:${process.env.PATH}` };
+      const res = spawnSync(process.execPath, [entry, "init", "--install-reap"], { encoding: "utf8", env });
+
+      // A failed install is a failed REQUEST - same false-green concern as
+      // verification failures (fix 3): the process must not exit 0 having
+      // silently skipped what was asked of it.
+      assert.equal(res.status, 1, res.stdout + res.stderr);
+      assert.match(res.stdout, /crontab: FAILED/);
+      assert.match(res.stdout, /refusing to modify crontab/);
+      assert.ok(!existsSync(writeAttempted), "crontab - must never be invoked when the existing crontab couldn't be reliably read");
+      assert.ok(!existsSync(store), "nothing should have been written to the (simulated) crontab at all");
     } finally {
       rmSync(initHome, { recursive: true, force: true });
       rmSync(stubDir, { recursive: true, force: true });

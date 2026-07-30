@@ -52,12 +52,24 @@ export function openDb(): DatabaseSync {
     );
     -- Attributed, append-only review receipts against a run. No migrations
     -- exist in this project by design (CREATE TABLE IF NOT EXISTS is the
-    -- whole mechanism) - this table sits alongside runs/events the same way.
+    -- whole mechanism) - this table sits alongside runs/events the same way,
+    -- and its schema is settled deliberately: there is no migration path to
+    -- fix it later once real fleets are writing rows.
     --
     -- Principles (load-bearing; do not "fix" these in a way that violates them):
-    --   - Append-only. A correction is a NEW row (higher seq), never an UPDATE
-    --     of an old one - there is no updateAssessment. The history of what
-    --     was asserted, and when, is itself the record.
+    --   - GENUINELY append-only - no UPDATE statement in this codebase ever
+    --     targets this table, full stop. A correction is a NEW row (higher
+    --     seq), never a mutation of an old one - there is no
+    --     updateAssessment. This is why delivery bookkeeping for
+    --     [notify.assessment] (the "notified" flag) lives in the SEPARATE
+    --     "assessment_notifications" table below, keyed (run_id,
+    --     assessment_seq), instead of as a column here: a mutable delivery
+    --     flag on this table would UPDATE a judgment row in place every time
+    --     a push claim was taken or released, contradicting "append-only" at
+    --     the literal SQL level even though no CLI path ever edited the
+    --     judgment fields themselves. Splitting it out makes the immutability
+    --     true of the actual schema, not just of the code that happens to
+    --     call it today.
     --   - pending_review is the ABSENCE of any row for a run, not a stored
     --     value. There is no disposition called "pending"; "mc ls"/"mc show"
     --     compute it by finding zero rows for a terminal run.
@@ -66,31 +78,51 @@ export function openDb(): DatabaseSync {
     --     - rubber-stamping is permitted by design. Attribution ("reviewer",
     --     "observed") gives PROVENANCE (who claimed what, from where), not
     --     trust in the claim itself. mc is not, and must never become, a
-    --     judge of quality.
+    --     judge of quality. The CHECK constraints below enforce only
+    --     STRUCTURE (a non-blank reviewer, one of the three literal
+    --     dispositions) - never anything about whether the judgment is
+    --     right, and they exist as defense in depth alongside the identical
+    --     validation in cli.ts's "mc assess", since this schema has no
+    --     migration path to add them later.
     --   - "reviewer" is an asserted identity: mandatory on every insert, never
     --     defaulted from the OS user or anything else - see "observed" below
-    --     for why those are kept separate.
+    --     for why those are kept separate. Whitespace-only is rejected (both
+    --     here, via CHECK, and in cli.ts before it ever reaches this table).
     --   - "observed" is what MC ITSELF independently saw while recording the
     --     assessment (the executing os user@host) - kept as its own column,
     --     distinct from "reviewer", so a false or aliased "--by" claim is at
     --     least checkable against what actually ran the command, without
     --     mc ever pretending to arbitrate between the two.
-    --   - No internal mc code path may ever INSERT a row here. "mc assess" (a
-    --     human- or orchestrator-invoked CLI command) is the only writer that
-    --     may ever exist for this table. The supervisor, "mc reap", "mc kill",
-    --     etc. must never assess a run themselves.
+    --   - No internal mc code path may ever INSERT (or UPDATE) a row here.
+    --     "mc assess" (a human- or orchestrator-invoked CLI command) is the
+    --     only writer that may ever exist for this table. The supervisor,
+    --     "mc reap", "mc kill", the notify seams - none of them may write a
+    --     judgment here on mc's own initiative. (The notify seam DOES write
+    --     to "assessment_notifications" below - that is delivery bookkeeping
+    --     about a judgment, never the judgment itself.)
     CREATE TABLE IF NOT EXISTS assessments (
       run_id TEXT NOT NULL,
       seq INTEGER NOT NULL,
       ts TEXT NOT NULL,
-      reviewer TEXT NOT NULL,
-      disposition TEXT NOT NULL,
+      reviewer TEXT NOT NULL CHECK (length(trim(reviewer)) > 0),
+      disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'retry', 'blocked')),
       checkpoint_sha TEXT,
       evidence TEXT NOT NULL,
       note TEXT,
       observed TEXT,
-      notified INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (run_id, seq)
+    );
+    -- Delivery bookkeeping for assessment rows, split out from "assessments"
+    -- above specifically so that table stays genuinely append-only (see its
+    -- comment). One row per assessment, created lazily on first delivery
+    -- attempt (a brand-new assessment simply has no row here yet, which
+    -- COALESCEs to "not yet notified" everywhere this is read - see
+    -- claimAssessmentNotify/setAssessmentNotified/unnotifiedAssessments).
+    CREATE TABLE IF NOT EXISTS assessment_notifications (
+      run_id TEXT NOT NULL,
+      assessment_seq INTEGER NOT NULL,
+      notified INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (run_id, assessment_seq)
     );
   `);
   return db;
@@ -219,10 +251,26 @@ function rowToAssessment(row: AssessmentRow): Assessment {
   return { ...row, evidence: JSON.parse(row.evidence), notified: row.notified === 1 };
 }
 
+// Every SELECT against `assessments` joins its delivery state in from
+// `assessment_notifications` (LEFT JOIN + COALESCE to 0) rather than reading
+// a column on `assessments` itself - see that table's comment for why the
+// split exists. A brand-new assessment has no row in the notifications table
+// yet, which COALESCEs to "not notified" - exactly the right default for a
+// row nothing has attempted to delivery yet.
+const ASSESSMENT_SELECT = `
+  SELECT a.run_id, a.seq, a.ts, a.reviewer, a.disposition, a.checkpoint_sha, a.evidence, a.note, a.observed,
+         COALESCE(n.notified, 0) AS notified
+  FROM assessments a
+  LEFT JOIN assessment_notifications n ON n.run_id = a.run_id AND n.assessment_seq = a.seq
+`;
+
 /**
  * Append a new assessment row. There is deliberately no `updateAssessment` -
  * see the assessments table comment above: a correction is a new row with a
- * higher `seq`, never a mutation of an earlier one.
+ * higher `seq`, never a mutation of an earlier one. The CHECK constraints on
+ * `assessments` (non-blank reviewer, a real disposition) enforce structure at
+ * the schema level too - this insert can throw if a caller ever bypasses
+ * cli.ts's own validation.
  */
 export function insertAssessment(
   runId: string,
@@ -239,8 +287,8 @@ export function insertAssessment(
   const insert = () =>
     openDb()
       .prepare(
-        `INSERT INTO assessments (run_id, seq, ts, reviewer, disposition, checkpoint_sha, evidence, note, observed, notified)
-         VALUES (?, 1 + COALESCE((SELECT MAX(seq) FROM assessments WHERE run_id = ?), 0), ?, ?, ?, ?, ?, ?, ?, 0)`,
+        `INSERT INTO assessments (run_id, seq, ts, reviewer, disposition, checkpoint_sha, evidence, note, observed)
+         VALUES (?, 1 + COALESCE((SELECT MAX(seq) FROM assessments WHERE run_id = ?), 0), ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         runId,
@@ -257,16 +305,22 @@ export function insertAssessment(
   try {
     result = insert();
   } catch {
-    result = insert(); // lost a seq race with another writer; the retry recomputes MAX(seq) - mirrors insertEvent
+    // Mirrors insertEvent's retry exactly: lost a seq race with another
+    // writer, so the retry recomputes MAX(seq). A CHECK-constraint violation
+    // (blank reviewer, bad disposition - cli.ts should never produce one, but
+    // this is defense in depth per the table comment) fails again identically
+    // on the retry and propagates from there, same as any other permanent
+    // failure would.
+    result = insert();
   }
-  const row = openDb().prepare("SELECT * FROM assessments WHERE rowid = ?").get(result.lastInsertRowid) as AssessmentRow;
+  const row = openDb().prepare(`${ASSESSMENT_SELECT} WHERE a.rowid = ?`).get(result.lastInsertRowid) as AssessmentRow;
   return rowToAssessment(row);
 }
 
 /** All assessments for a run, oldest first - the full append-only history. */
 export function assessmentsFor(runId: string): Assessment[] {
   return (
-    openDb().prepare("SELECT * FROM assessments WHERE run_id = ? ORDER BY seq").all(runId) as AssessmentRow[]
+    openDb().prepare(`${ASSESSMENT_SELECT} WHERE a.run_id = ? ORDER BY a.seq`).all(runId) as AssessmentRow[]
   ).map(rowToAssessment);
 }
 
@@ -280,30 +334,40 @@ export function latestAssessment(runId: string): Assessment | null {
   return rows.length > 0 ? rows[rows.length - 1]! : null;
 }
 
+/** Lazily create the delivery-state row for one assessment if it doesn't exist yet, defaulting to "not notified". */
+function ensureAssessmentNotificationRow(runId: string, seq: number): void {
+  openDb()
+    .prepare("INSERT OR IGNORE INTO assessment_notifications (run_id, assessment_seq, notified) VALUES (?, ?, 0)")
+    .run(runId, seq);
+}
+
 /**
- * Atomically claim the notify obligation for ONE assessment row: flips
- * `notified` 0 -> 1 and returns whether THIS caller won the race. Mirrors
- * claimNotify's compare-and-swap shape exactly, one level down (per
- * assessment row instead of per run) - see notify.ts's notifyAssessment for
- * how a total delivery failure releases the claim again via
- * setAssessmentNotified.
+ * Atomically claim the notify obligation for ONE assessment: flips its
+ * delivery-state row's `notified` 0 -> 1 and returns whether THIS caller won
+ * the race. Mirrors claimNotify's compare-and-swap shape exactly, one level
+ * down (per assessment instead of per run) - see notify.ts's notifyAssessment
+ * for how a total delivery failure releases the claim again via
+ * setAssessmentNotified. Operates on `assessment_notifications`, never on
+ * `assessments` itself - see that table's comment for why.
  */
 export function claimAssessmentNotify(runId: string, seq: number): boolean {
+  ensureAssessmentNotificationRow(runId, seq);
   const result = openDb()
-    .prepare("UPDATE assessments SET notified = 1 WHERE run_id = ? AND seq = ? AND notified = 0")
+    .prepare("UPDATE assessment_notifications SET notified = 1 WHERE run_id = ? AND assessment_seq = ? AND notified = 0")
     .run(runId, seq);
   return Number(result.changes) > 0;
 }
 
 export function setAssessmentNotified(runId: string, seq: number, notified: boolean): void {
+  ensureAssessmentNotificationRow(runId, seq);
   openDb()
-    .prepare("UPDATE assessments SET notified = ? WHERE run_id = ? AND seq = ?")
+    .prepare("UPDATE assessment_notifications SET notified = ? WHERE run_id = ? AND assessment_seq = ?")
     .run(notified ? 1 : 0, runId, seq);
 }
 
 /** Every assessment row still owed a delivery attempt - what `mc reap` retries. */
 export function unnotifiedAssessments(): Assessment[] {
   return (
-    openDb().prepare("SELECT * FROM assessments WHERE notified = 0 ORDER BY run_id, seq").all() as AssessmentRow[]
+    openDb().prepare(`${ASSESSMENT_SELECT} WHERE COALESCE(n.notified, 0) = 0 ORDER BY a.run_id, a.seq`).all() as AssessmentRow[]
   ).map(rowToAssessment);
 }

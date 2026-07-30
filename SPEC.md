@@ -154,46 +154,67 @@ CREATE TABLE IF NOT EXISTS assessments (
   run_id TEXT NOT NULL,
   seq INTEGER NOT NULL,
   ts TEXT NOT NULL,
-  reviewer TEXT NOT NULL,
-  disposition TEXT NOT NULL,          -- accepted | retry | blocked
+  reviewer TEXT NOT NULL CHECK (length(trim(reviewer)) > 0),
+  disposition TEXT NOT NULL CHECK (disposition IN ('accepted', 'retry', 'blocked')),
   checkpoint_sha TEXT,                -- optional; verified via git when the workdir survives
   evidence TEXT NOT NULL,             -- JSON [{path, sha256}], sha256 computed at write time
   note TEXT,
   observed TEXT,                      -- what MC saw: os user@host, distinct from `reviewer`
-  notified INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (run_id, seq)
+);
+
+-- Delivery bookkeeping for [notify.assessment], split into its OWN table -
+-- see "genuinely append-only" below for why this isn't a column above.
+CREATE TABLE IF NOT EXISTS assessment_notifications (
+  run_id TEXT NOT NULL,
+  assessment_seq INTEGER NOT NULL,
+  notified INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (run_id, assessment_seq)
 );
 ```
 
 Principles (load-bearing - the CLI, docs, and tests all encode these; see db.ts):
 
-- **Append-only.** A correction is a NEW row at a higher `seq`, never an UPDATE of an
-  earlier one. There is no `updateAssessment`. The full history - who claimed what and
-  when, including anything later superseded - stays on the record; `mc show <id>`
-  prints it oldest-first in full, not just the latest.
+- **Genuinely append-only, at the literal schema level.** A correction is a NEW row at
+  a higher `seq`, never an UPDATE of an earlier one - no UPDATE statement in the
+  codebase ever targets `assessments`, full stop. This is why delivery bookkeeping (the
+  `notified` flag) lives in the SEPARATE `assessment_notifications` table above, keyed
+  `(run_id, assessment_seq)`, rather than as a column on `assessments` itself: a mutable
+  delivery flag on the judgment table would UPDATE a judgment row in place on every
+  notify claim/release, contradicting "append-only" at the SQL level even though no CLI
+  path ever edits the judgment fields. There is no `updateAssessment`. The full
+  judgment history - who claimed what and when, including anything later superseded -
+  stays on the record; `mc show <id>` prints it oldest-first in full, not just the
+  latest (`mc show <id> --json` returns the same history with `notified` joined in).
 - **`pending_review` is the ABSENCE of a row, not a stored value.** No disposition is
   ever named `"pending"`; mc computes it at read time (`mc ls`/`mc show`) by finding
   zero assessment rows for a terminal run. A non-terminal run shows `-`, not
   `pending`: review begins only after the process stops (`mc assess` refuses queued/
   running runs by name).
-- **mc validates STRUCTURE, never the JUDGMENT.** `mc assess` checks that the run is
-  terminal, `--by` is present, `--disposition` is one of the three literal values, and
-  any `--evidence` files actually exist (mc hashes them - sha256 - at write time;
-  content is never stored, only path + hash). It never checks whether `accepted` was
-  the *right* call. Rubber-stamping is permitted BY DESIGN: `reviewer` and `observed`
-  give the record PROVENANCE (who claimed it, and what mc itself independently saw
-  while recording it - the executing os user@host, a distinct column from the
-  asserted `reviewer`), not trust in the claim. mc is a ledger of who said what, never
-  a judge of whether they were right to say it.
+- **mc validates STRUCTURE, never the JUDGMENT - at two layers.** `mc assess` checks
+  that the run is terminal, `--by` is present and non-blank after trimming (a
+  whitespace-only reviewer is rejected the same as a missing one), `--disposition` is
+  one of the three literal values, and any `--evidence` files actually exist (mc hashes
+  them - sha256 - at write time; content is never stored, only path + hash). The CHECK
+  constraints above enforce the non-blank-reviewer and valid-disposition rules again at
+  the schema level, as defense in depth: this schema has no migration path to add them
+  later, so they are settled now rather than left to the CLI alone. Neither layer
+  checks whether `accepted` was the *right* call. Rubber-stamping is permitted BY
+  DESIGN: `reviewer` and `observed` give the record PROVENANCE (who claimed it, and
+  what mc itself independently saw while recording it - the executing os user@host, a
+  distinct column from the asserted `reviewer`), not trust in the claim. mc is a ledger
+  of who said what, never a judge of whether they were right to say it.
 - **`reviewer` is an asserted identity - mandatory, never defaulted.** `--by` has no
-  fallback to the OS user or anything else; omitting it fails loudly. Defaulting it
-  would silently convert "who is claiming this" into "whoever happened to run the
-  command," destroying the one thing attribution is for.
+  fallback to the OS user or anything else; omitting it (or supplying only whitespace)
+  fails loudly. Defaulting it would silently convert "who is claiming this" into
+  "whoever happened to run the command," destroying the one thing attribution is for.
 - **No internal mc code path may ever WRITE an assessment.** `mc assess` (a human- or
-  orchestrator-invoked CLI command) is the only writer this table has, or will ever
+  orchestrator-invoked CLI command) is the only writer `assessments` has, or will ever
   have. The supervisor, `mc reap`, `mc kill`, the notify seams - none of them may
-  assess a run on mc's own initiative. An assessment that mc generated itself would
-  not be an assessment; it would just be `exit` wearing a different name.
+  assess a run on mc's own initiative. (The notify seam DOES write to
+  `assessment_notifications` - that is delivery bookkeeping about a judgment, never
+  the judgment itself.) An assessment that mc generated itself would not be an
+  assessment; it would just be `exit` wearing a different name.
 - **`--at SHA` records a checkpoint, verified when possible.** If the run's workdir
   still exists and is a git repo, mc runs `git rev-parse --verify` there and refuses a
   SHA that doesn't resolve. If the workdir has been pruned or never was git, mc
@@ -596,7 +617,10 @@ mc run    --harness H [--model M] [--cwd DIR] [--budget N] [--max-minutes N] [--
           [--gateway NAME | --api-key] [--artifact PATH]... [--effort E] "prompt"
 mc run    --spec -            # full RunSpec as JSON on stdin (the remote-safe form)
 mc ls     [--json] [--exit STATE,...] [--review DISPOSITION,...]
-mc show   <run-id>            # full record, recent events, cost, full assessment history
+mc show   <run-id> [--json]    # full record, recent events, cost, full assessment history;
+                              # --json returns {run, assessments, events} - the FULL event
+                              # stream and assessments complete with evidence/checkpoint/
+                              # delivery state, not the human form's abbreviated last-10
 mc tail   <run-id>            # follow the event stream
 mc kill   <run-id>
 mc resume <run-id> [--fresh [--at SHA]] "follow-up"

@@ -601,34 +601,62 @@ function upsertTomlSection(text: string, section: string, lines: string[]): stri
   return `${out.join("\n")}\n`;
 }
 
-function currentCrontab(): string {
+type CrontabRead = { ok: true; text: string } | { ok: false; reason: string };
+
+/**
+ * Read the current user's crontab, FAILING CLOSED on anything ambiguous.
+ * `crontab -l` exits nonzero both for "this user genuinely has no crontab
+ * yet" (the ordinary, expected case) AND for real failures - permission
+ * denied, the binary missing, a transient read error. Those are NOT the same
+ * thing, and conflating them used to mean any transient failure here read as
+ * "empty crontab" - which installReapCron below would then treat as safe to
+ * REPLACE with just mc's own line, destroying whatever the user's actual
+ * crontab held. Only the specific, positively-identified "no crontab for
+ * this user" message - which both cron implementations observed (vixie-cron/
+ * cronie on Linux, the bundled cron on macOS) print to stderr on that exact
+ * case - counts as genuinely empty. Anything else is reported as a failure
+ * to the caller, never silently swallowed into "".
+ */
+function readCrontab(): CrontabRead {
   const r = spawnSync("crontab", ["-l"], { encoding: "utf8" });
-  // A nonzero exit with empty stdout is the ordinary "no crontab installed
-  // yet for this user" case on both cron implementations observed (vixie-
-  // cron, cronie) - not a real error worth surfacing.
-  return r.status === 0 ? r.stdout : "";
+  if (r.status === 0) return { ok: true, text: r.stdout };
+  if (r.error) return { ok: false, reason: `could not run crontab: ${r.error.message}` };
+  if (/no crontab for/i.test(r.stderr ?? "")) return { ok: true, text: "" };
+  return { ok: false, reason: (r.stderr ?? "").trim() || `crontab -l exited with status ${r.status}` };
 }
 
-function reapCronPresent(): boolean {
-  return currentCrontab()
-    .split("\n")
-    .some((l) => l.includes(REAP_CRON_TAG));
+/** Informational only (used by `mc init --check`'s display line) - an unreadable crontab reads as "unknown", never a false "absent". */
+function reapCronStatus(): "present" | "absent" | "unknown" {
+  const read = readCrontab();
+  if (!read.ok) return "unknown";
+  return read.text.split("\n").some((l) => l.includes(REAP_CRON_TAG)) ? "present" : "absent";
 }
 
 /**
  * Idempotent: checks for the tag BEFORE writing, so re-running `mc init
  * --install-reap` never duplicates the line. Removable by hand - the tagged
  * trailing comment is the documented way to find and delete it (`crontab -e`).
+ * Refuses to write at all if the existing crontab couldn't be reliably read
+ * (see readCrontab) - better to fail the install loudly than risk clobbering
+ * a crontab mc failed to see the real contents of.
  */
-function installReapCron(): { installed: boolean; detail: string } {
-  if (reapCronPresent()) return { installed: false, detail: "already present" };
+function installReapCron(): { status: "added" | "already-present" | "failed"; detail: string } {
+  const read = readCrontab();
+  if (!read.ok) {
+    return {
+      status: "failed",
+      detail: `refusing to modify crontab - could not reliably read the existing one: ${read.reason}`,
+    };
+  }
+  if (read.text.split("\n").some((l) => l.includes(REAP_CRON_TAG))) {
+    return { status: "already-present", detail: "already present" };
+  }
   const mcPath = realpathSync(process.argv[1]!);
   const line = `*/10 * * * * ${mcPath} reap ${REAP_CRON_TAG}`;
-  const existing = currentCrontab();
-  const next = existing.length > 0 && !existing.endsWith("\n") ? `${existing}\n${line}\n` : `${existing}${line}\n`;
+  const next = read.text.length > 0 && !read.text.endsWith("\n") ? `${read.text}\n${line}\n` : `${read.text}${line}\n`;
   const r = spawnSync("crontab", ["-"], { input: next, encoding: "utf8" });
-  if (r.status !== 0) return { installed: false, detail: `crontab write failed: ${r.stderr?.trim() || "unknown error"}` };
-  return { installed: true, detail: line };
+  if (r.status !== 0) return { status: "failed", detail: `crontab write failed: ${r.stderr?.trim() || "unknown error"}` };
+  return { status: "added", detail: line };
 }
 
 /**
@@ -695,8 +723,10 @@ async function initCheck(): Promise<void> {
   }
 
   // Crontab presence is informational only - not opting into --install-reap
-  // is a valid, common configuration, not a broken one.
-  console.log(`  (info) crontab reap entry: ${reapCronPresent() ? "present" : "absent"}`);
+  // is a valid, common configuration, not a broken one. "unknown" (a
+  // genuinely unreadable crontab) is reported as such, never collapsed into
+  // a false "absent" - see readCrontab's fail-closed reasoning.
+  console.log(`  (info) crontab reap entry: ${reapCronStatus()}`);
 
   if (broken) {
     console.error("\nmc init --check found problem(s) above; nothing was changed");
@@ -780,19 +810,42 @@ async function runInit(args: string[]): Promise<void> {
   }
 
   // Verify, don't assume - every hook this invocation named gets an
-  // immediate synthetic push, reported honestly either way.
+  // immediate synthetic push, reported honestly either way. Config.toml is
+  // already written above regardless of what happens here (verification
+  // failing does not mean the write itself failed); what changes is the
+  // process's own exit code, tracked in `anyFailed` below.
+  let anyFailed = false;
   if (notifyExec || notifyWebhook) {
     const ok = await sendTest({ exec: notifyExec, webhook: notifyWebhook });
     console.log(`[notify] verification: ${ok ? "OK (delivered)" : "FAILED (not delivered)"}`);
+    if (!ok) anyFailed = true;
   }
   if (assessmentExec || assessmentWebhook) {
     const ok = await sendTest({ exec: assessmentExec, webhook: assessmentWebhook });
     console.log(`[notify.assessment] verification: ${ok ? "OK (delivered)" : "FAILED (not delivered)"}`);
+    if (!ok) anyFailed = true;
   }
 
   if (installReap) {
     const result = installReapCron();
-    console.log(result.installed ? `crontab: added reap entry (${result.detail})` : `crontab: ${result.detail}`);
+    console.log(
+      result.status === "added"
+        ? `crontab: added reap entry (${result.detail})`
+        : result.status === "already-present"
+          ? "crontab: already present"
+          : `crontab: FAILED (${result.detail})`,
+    );
+    if (result.status === "failed") anyFailed = true;
+  }
+
+  // A requested verification or install that failed is exactly the silent
+  // false-green `mc init` exists to eliminate - report everything above
+  // first (an operator debugging this needs to see ALL the results, not just
+  // the first failure), THEN fail the process so automation (a setup script,
+  // CI) notices without having to grep stdout for "FAILED".
+  if (anyFailed) {
+    console.error("\nmc init: one or more requested verifications or installs failed (see FAILED lines above)");
+    process.exit(1);
   }
 }
 
@@ -830,6 +883,10 @@ COMMANDS
                 (e.g. --review pending  |  --review accepted,retry)
   show <id>     Full run record, recent events, and the run's full
                 assessment history (oldest first)
+                --json      {run, assessments, events} as clean machine-
+                            readable JSON: FULL event stream (not last-10),
+                            assessments complete with evidence hashes,
+                            checkpoint, and delivery state
   tail <id>     Follow a run's event stream until it terminates
   kill <id>     Request termination (state lands when the process actually dies)
   assess <id> --by REVIEWER --disposition accepted|retry|blocked
@@ -1013,8 +1070,32 @@ export async function cliMain(argv: string[]): Promise<void> {
       }
 
       case "show": {
+        // show takes an id and an optional --json, in either order; any other
+        // "--"-prefixed token fails loudly rather than being silently ignored.
+        const jsonMode = args.includes("--json");
+        for (const arg of args) {
+          if (arg !== "--json" && arg.startsWith("--")) fail(`unknown show argument "${arg}" (valid: --json)`);
+        }
+        const idArg = args.find((a) => a !== "--json");
         // Read command: detect lost runs only, never dispatch/retry delivery.
-        const run = (await reapLostRuns([requireRun(args[0])], false))[0]!;
+        const run = (await reapLostRuns([requireRun(idArg)], false))[0]!;
+        // Oldest first, full history - never just the latest, per the
+        // assessments table's append-only principle (a correction is a new
+        // row, and the earlier ones remain part of the record). Computed once
+        // and shared by both output modes below.
+        const assessments = assessmentsFor(run.id);
+
+        if (jsonMode) {
+          // The machine-readable form: run + the assessments' COMPLETE shape
+          // (evidence path+sha256, checkpoint_sha, notified delivery state -
+          // everything the human form's prose lines below only partially
+          // surface) + the FULL event stream, not the human form's
+          // abbreviated last-10 - so a script never has to fall back to
+          // scraping prose for anything this command knows.
+          console.log(JSON.stringify({ run, assessments, events: eventsAfter(run.id, 0) }, null, 2));
+          break;
+        }
+
         console.log(JSON.stringify(run, null, 2));
         // Highlighted summary: the JSON above already carries cost_usd/tokens_in/
         // tokens_out/started_at/ended_at, but as ~4 fields among ~20 - and on a
@@ -1030,10 +1111,6 @@ export async function cliMain(argv: string[]): Promise<void> {
           console.log("\nlast events:");
           for (const event of recent) console.log(`  [${event.seq}] ${event.kind} ${JSON.stringify(event.payload).slice(0, 120)}`);
         }
-        // Full append-only history, oldest first - never just the latest, per
-        // the assessments table's append-only principle (a correction is a
-        // new row, and the earlier ones remain part of the record).
-        const assessments = assessmentsFor(run.id);
         if (assessments.length > 0) {
           console.log("\nassessments:");
           for (const a of assessments) {
@@ -1204,7 +1281,15 @@ export async function cliMain(argv: string[]): Promise<void> {
         // reviewer is an ASSERTED identity (see db.ts's assessments table
         // comment) - mandatory, and never defaulted to the OS user or
         // anything else. Defaulting it would quietly convert "who is
-        // claiming this" into "whoever happened to run the command".
+        // claiming this" into "whoever happened to run the command". Trim
+        // before checking: a whitespace-only value ("--by '   '") is not an
+        // identity either - the pre-trim falsiness check alone let it through
+        // (a non-empty string is truthy regardless of what's in it), and the
+        // trimmed value is also what gets stored, so " alice " and "alice"
+        // aren't silently treated as different reviewers. db.ts's CHECK
+        // constraint (length(trim(reviewer)) > 0) enforces the same rule at
+        // the schema level as defense in depth.
+        reviewer = reviewer?.trim() ?? null;
         if (!reviewer) fail("--by is required (reviewer identity is never defaulted)");
         if (!disposition || !DISPOSITION_VALUES.includes(disposition)) {
           fail(`--disposition is required, one of: ${DISPOSITION_VALUES.join(", ")}`);
