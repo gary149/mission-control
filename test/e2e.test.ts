@@ -152,8 +152,15 @@ describe("mission-control e2e (stub harness)", () => {
     assert.equal(done.session_id, "fake-session-123");
     assert.ok(existsSync(join(done.workdir, "out.txt")));
 
-    // Event stream has the normalized shape.
-    const events = eventsAfter(run.id, 0);
+    // Event stream has the normalized shape. The terminal ROW lands before
+    // the supervisor's notify dispatch records its notify_result event, so
+    // waitTerminal alone can race the last milliseconds of delivery under
+    // load - poll briefly for notify_result before asserting on the stream.
+    let events = eventsAfter(run.id, 0);
+    for (let i = 0; i < 40 && !events.some((e: any) => e.kind === "notify_result"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      events = eventsAfter(run.id, 0);
+    }
     const kinds = events.map((e: any) => e.kind);
     for (const expected of ["started", "text", "tool_call", "subagent", "cost_update", "notify_result", "exited"]) {
       assert.ok(kinds.includes(expected), `missing event kind ${expected} in ${kinds}`);
