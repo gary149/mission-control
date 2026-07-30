@@ -1,6 +1,6 @@
 {
   "name": "mission-control",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Control plane for delegated agent runs",
   "type": "module",
   "bin": {
