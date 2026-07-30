@@ -1711,4 +1711,120 @@ describe("mission-control e2e (stub harness)", () => {
       writeFileSync(configPath, original);
     }
   });
+
+  test("mc prune: classifies dirty/unintegrated/safe correctly, reclaims only safe, leaves the ledger and spec intact", async () => {
+    const { launch } = await import("../src/core/launch.ts");
+    const { getRun, insertRun } = await import("../src/core/db.ts");
+    const { evaluateWorktree, pruneWorktree } = await import("../src/core/prune.ts");
+
+    const repo = mkdtempSync(join(tmpdir(), "mc-prune-"));
+    try {
+      spawnSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
+      writeFileSync(join(repo, "README.md"), "seed\n");
+      spawnSync(
+        "sh",
+        ["-c", `git -C ${repo} add -A && git -C ${repo} -c user.email=t@t -c user.name=t commit -q -m seed`],
+        { stdio: "ignore" },
+      );
+
+      // Dirty: default fake-harness path writes out.txt WITHOUT committing.
+      const dirtyRun = launch(baseSpec({ prompt: "just write stuff", cwd: repo }) as never);
+      const dirtyDone = await waitTerminal(() => getRun(dirtyRun.id));
+      const dirtyCandidate = evaluateWorktree(dirtyDone);
+      assert.equal(dirtyCandidate.status, "dirty", dirtyCandidate.detail);
+
+      // Clean commit, but the SOURCE repo hasn't absorbed it yet - unintegrated.
+      const safeRun = launch(baseSpec({ prompt: "commit it GITCOMMIT", cwd: repo }) as never);
+      const safeDone = await waitTerminal(() => getRun(safeRun.id));
+      const preMergeCandidate = evaluateWorktree(safeDone);
+      assert.equal(preMergeCandidate.status, "unintegrated", preMergeCandidate.detail);
+
+      // Fast-forward the source repo to that same commit - now genuinely
+      // recoverable from the source repo's own history, nothing lost by
+      // reclaiming the checkout.
+      const head = spawnSync("git", ["-C", safeDone.workdir, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+      const ff = spawnSync("git", ["-C", repo, "merge", "--ff-only", head], { encoding: "utf8" });
+      assert.equal(ff.status, 0, ff.stderr);
+      const safeCandidate = evaluateWorktree(safeDone);
+      assert.equal(safeCandidate.status, "safe", safeCandidate.detail);
+
+      // A still-active run must never be touched, even if the filesystem
+      // would otherwise look safe - status gates BEFORE any git call runs.
+      const activeId = "prune-active";
+      insertRun(placeholderRun(activeId, { exit: "running", workdir: join(home, "nonexistent-workdir") }) as never);
+      const activeCandidate = evaluateWorktree(getRun(activeId)!);
+      assert.equal(activeCandidate.status, "active");
+      assert.equal(activeCandidate.sizeBytes, null);
+
+      // Refuse to remove anything but "safe" - dirty and unintegrated stay.
+      const dirtyResult = pruneWorktree(dirtyCandidate);
+      assert.equal(dirtyResult.removed, false);
+      assert.ok(existsSync(dirtyDone.workdir), "dirty worktree must survive a prune attempt");
+      const unintegratedResult = pruneWorktree(preMergeCandidate);
+      assert.equal(unintegratedResult.removed, false);
+
+      // The actual reclaim: checkout gone, ledger/spec untouched.
+      const removeResult = pruneWorktree(safeCandidate);
+      assert.equal(removeResult.removed, true, removeResult.error);
+      assert.ok(!existsSync(safeDone.workdir), "safe worktree must be gone after prune");
+      assert.ok(existsSync(safeDone.spec_path), "spec.json must survive - only the checkout is reclaimed");
+      assert.equal(getRun(safeDone.id)!.exit, "succeeded", "the ledger row itself is untouched");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  test("mc prune CLI: dry-run reports without deleting, --yes reclaims only safe, --json is parseable, unknown args fail loudly", async () => {
+    const { insertRun, getRun } = await import("../src/core/db.ts");
+    const entry = fileURLToPath(new URL("../src/mc.ts", import.meta.url));
+
+    const repo = mkdtempSync(join(tmpdir(), "mc-prune-cli-"));
+    try {
+      spawnSync("git", ["-C", repo, "init", "-q"], { stdio: "ignore" });
+      writeFileSync(join(repo, "README.md"), "seed\n");
+      spawnSync(
+        "sh",
+        ["-c", `git -C ${repo} add -A && git -C ${repo} -c user.email=t@t -c user.name=t commit -q -m seed`],
+        { stdio: "ignore" },
+      );
+      const seedHead = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+
+      const workdir = join(home, "prune-cli-work");
+      spawnSync("git", ["-C", repo, "worktree", "add", "--detach", workdir], { stdio: "ignore" });
+      // Clean, and already the repo's own HEAD - trivially integrated: safe.
+      const id = "prunecli1";
+      const specPath = join(home, `${id}.json`); // placeholderRun's default spec_path
+      writeFileSync(specPath, "{}"); // a real file to prove prune leaves it alone
+      insertRun(placeholderRun(id, { exit: "succeeded", workdir, notified: true }) as never);
+
+      const dry = spawnSync(process.execPath, [entry, "prune"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(dry.status, 0, dry.stderr);
+      assert.ok(dry.stdout.includes(id), dry.stdout);
+      assert.ok(dry.stdout.includes("safe to prune"), dry.stdout);
+      assert.ok(existsSync(workdir), "dry-run must not delete anything");
+
+      const json = spawnSync(process.execPath, [entry, "prune", "--json"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(json.status, 0, json.stderr);
+      const rows = JSON.parse(json.stdout) as { id: string; status: string; removed: boolean | null }[];
+      const row = rows.find((r) => r.id === id);
+      assert.ok(row, json.stdout);
+      assert.equal(row!.status, "safe");
+      assert.equal(row!.removed, null); // --json alone (no --yes) never removes
+      assert.ok(existsSync(workdir), "--json without --yes must not delete anything");
+
+      const apply = spawnSync(process.execPath, [entry, "prune", "--yes"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(apply.status, 0, apply.stderr);
+      assert.ok(apply.stdout.includes("reclaimed 1/1"), apply.stdout);
+      assert.ok(!existsSync(workdir), "--yes must actually remove the safe worktree");
+      assert.ok(existsSync(getRun(id)!.spec_path), "spec.json survives pruning");
+
+      const badFlag = spawnSync(process.execPath, [entry, "prune", "--force"], { encoding: "utf8", env: { ...process.env } });
+      assert.equal(badFlag.status, 1);
+      assert.match(badFlag.stderr, /unknown prune argument "--force"/);
+
+      void seedHead; // documents the fixture's starting point; not asserted on directly
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
 });

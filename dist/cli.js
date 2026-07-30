@@ -10,6 +10,7 @@ import { loadConfig } from "./core/config.js";
 import { eventsAfter, findRun, listRuns, markLost, getRun, insertEvent } from "./core/db.js";
 import { launch } from "./core/launch.js";
 import { notifyTerminal } from "./core/notify.js";
+import { evaluateWorktree, pruneWorktree } from "./core/prune.js";
 import { PreflightError } from "./core/types.js";
 function fail(message) {
     console.error(`mc: ${message}`);
@@ -248,6 +249,18 @@ async function reapLostRuns(runs, deliver = false) {
         out.push(current);
     }
     return out;
+}
+function formatBytes(bytes) {
+    if (bytes < 1024)
+        return `${bytes}B`;
+    const units = ["K", "M", "G", "T"];
+    let n = bytes / 1024;
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) {
+        n /= 1024;
+        i++;
+    }
+    return `${n < 10 ? n.toFixed(1) : Math.round(n)}${units[i]}`;
 }
 function age(iso) {
     const seconds = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -513,6 +526,13 @@ COMMANDS
                 --max-minutes, --max-idle-minutes, --budget
   reap          Cron-safe: mark dead-supervisor runs lost, deliver pending
                 notifications (e.g. */10 * * * * mc reap)
+  prune         Reclaim disk from terminal runs' worktrees. Default: dry-run
+                report (candidate, status, size). --yes actually removes -
+                only worktrees that are CLEAN and whose HEAD is already
+                reachable from the source repo's current HEAD (nothing lost);
+                everything else (dirty, unmerged, still active) is left
+                alone. The run's ledger row and spec survive either way -
+                only the checkout itself is reclaimed.
   ls            List runs; also reaps lost runs and re-delivers missed notifications.
                 --exit filters by state, comma-separated
                 (e.g. --exit running  |  --exit failed,killed,lost)
@@ -822,6 +842,48 @@ export async function cliMain(argv) {
                 // external receipt (a failed hook leaves notified=false for retry).
                 const settled = after.filter((r) => r.notified && (unnotified.has(r.id) || (activeIds.has(r.id) && r.exit === "lost"))).length;
                 console.log(`reaped ${lost} lost run(s), settled ${settled} notification(s)`);
+                break;
+            }
+            case "prune": {
+                for (const arg of args) {
+                    if (arg !== "--yes" && arg !== "--json")
+                        fail(`unknown prune argument "${arg}" (valid: --yes, --json)`);
+                }
+                const yes = args.includes("--yes");
+                const candidates = listRuns().map(evaluateWorktree);
+                const safe = candidates.filter((c) => c.status === "safe");
+                const results = yes
+                    ? safe.map((c) => ({ ...c, result: pruneWorktree(c) }))
+                    : safe.map((c) => ({ ...c, result: undefined }));
+                if (args.includes("--json")) {
+                    console.log(JSON.stringify(candidates.map((c) => ({
+                        id: c.run.id,
+                        status: c.status,
+                        size_bytes: c.sizeBytes,
+                        detail: c.detail,
+                        removed: results.find((r) => r.run.id === c.run.id)?.result?.removed ?? null,
+                    })), null, 2));
+                    break;
+                }
+                const relevant = candidates.filter((c) => c.status !== "active" && c.status !== "missing");
+                if (relevant.length === 0) {
+                    console.log("nothing to prune");
+                    break;
+                }
+                for (const c of relevant) {
+                    const size = c.sizeBytes != null ? formatBytes(c.sizeBytes) : "-";
+                    const acted = yes ? results.find((r) => r.run.id === c.run.id)?.result : undefined;
+                    const mark = acted ? (acted.removed ? "removed" : `FAILED: ${acted.error}`) : c.status;
+                    console.log(`${c.run.id}  ${mark.padEnd(9)}  ${size.padStart(7)}  ${c.detail}`);
+                }
+                const totalSafeBytes = safe.reduce((sum, c) => sum + (c.sizeBytes ?? 0), 0);
+                if (yes) {
+                    const removed = results.filter((r) => r.result?.removed).length;
+                    console.log(`\nreclaimed ${removed}/${safe.length} worktree(s), ~${formatBytes(totalSafeBytes)}`);
+                }
+                else if (safe.length > 0) {
+                    console.log(`\n${safe.length} safe to prune, ~${formatBytes(totalSafeBytes)} reclaimable. Run \`mc prune --yes\` to reclaim.`);
+                }
                 break;
             }
             case "harness": {
